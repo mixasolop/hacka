@@ -978,8 +978,9 @@ def render_scenario_builder_page():
                 st.session_state["show_debug"] = not st.session_state.get("show_debug", False)
 
             if run_now:
-                st.session_state["texture_seed"] = int(np.random.randint(0, 1_000_000_000))
+                submitted_seed = int(st.session_state.get("texture_seed", int(np.random.randint(0, 1_000_000_000))))
                 st.session_state["submitted"] = True
+                st.session_state["submitted_texture_seed"] = submitted_seed
                 st.session_state["submitted_scenario_snapshot"] = dict(current_inputs)
                 st.session_state["params"] = runtime_payload
                 if hasattr(st, "switch_page"):
