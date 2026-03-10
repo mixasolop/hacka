@@ -80,6 +80,37 @@ EMISSIONS_MODE_MULTIPLIER = {
     "Aggressive Mitigation": 0.65,
 }
 
+EARTHLIKE_SHARED_INITIAL_KEYS = (
+    "stellar_flux_multiplier",
+    "enable_seasonality",
+    "warm_albedo",
+    "ice_albedo",
+    "initial_co2_ppm",
+    "habitability_profile",
+    "habitable_temp_min_c",
+    "habitable_temp_max_c",
+)
+EARTHLIKE_POLICY_KEYS = (
+    "emissions_rate",
+    "emissions_growth_mode",
+    "mitigation_start_year",
+    "mitigation_strength",
+)
+SCENARIO_INPUT_KEYS = (
+    "stellar_flux_multiplier",
+    "enable_seasonality",
+    "warm_albedo",
+    "ice_albedo",
+    "initial_co2_ppm",
+    "emissions_rate",
+    "emissions_growth_mode",
+    "mitigation_start_year",
+    "mitigation_strength",
+    "habitability_profile",
+    "habitable_temp_min_c",
+    "habitable_temp_max_c",
+)
+
 PRESETS = {
     "Earth-like Baseline": {
         "stellar_flux_multiplier": 1.00,
@@ -96,11 +127,11 @@ PRESETS = {
         "habitable_temp_max_c": 45.0,
     },
     "Carefree Civilization": {
-        "stellar_flux_multiplier": 1.03,
+        "stellar_flux_multiplier": 1.00,
         "enable_seasonality": True,
-        "warm_albedo": 0.28,
-        "ice_albedo": 0.60,
-        "initial_co2_ppm": 460.0,
+        "warm_albedo": 0.30,
+        "ice_albedo": 0.62,
+        "initial_co2_ppm": 420.0,
         "emissions_rate": 4.8,
         "emissions_growth_mode": "Carefree",
         "mitigation_start_year": 120,
@@ -369,11 +400,31 @@ def _section_header(title: str, first: bool = False):
 
 def _initialize_state():
     defaults = PRESETS["Earth-like Baseline"]
-    for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
-    st.session_state.setdefault("preset_name", "Earth-like Baseline")
+    forced_preset_name = st.session_state.pop("force_preset_name_once", None)
+    persisted_inputs = st.session_state.get("builder_persisted_inputs")
+    if not isinstance(persisted_inputs, dict):
+        persisted_inputs = dict(defaults)
+        st.session_state["builder_persisted_inputs"] = persisted_inputs
+
+    for key in SCENARIO_INPUT_KEYS:
+        st.session_state.setdefault(key, persisted_inputs.get(key, defaults[key]))
+
+    if isinstance(forced_preset_name, str) and forced_preset_name in PRESETS:
+        desired_preset_name = forced_preset_name
+        st.session_state["preset_name"] = desired_preset_name
+    else:
+        current_widget_preset = st.session_state.get("preset_name")
+        if isinstance(current_widget_preset, str) and current_widget_preset in PRESETS:
+            desired_preset_name = current_widget_preset
+        else:
+            desired_preset_name = str(st.session_state.get("builder_persisted_preset_name", "Earth-like Baseline"))
+            if desired_preset_name not in PRESETS:
+                desired_preset_name = "Earth-like Baseline"
+            st.session_state["preset_name"] = desired_preset_name
+    st.session_state["builder_persisted_preset_name"] = desired_preset_name
     st.session_state.setdefault("show_debug", False)
     st.session_state.setdefault("texture_seed", int(np.random.randint(0, 1_000_000_000)))
+    st.session_state.setdefault("submitted_scenario_snapshot", None)
     for key in REMOVED_UI_KEYS:
         st.session_state.pop(key, None)
 
@@ -384,6 +435,8 @@ def _apply_preset(name: str):
         return
     for key, value in preset.items():
         st.session_state[key] = value
+    st.session_state["builder_persisted_preset_name"] = name
+    st.session_state["builder_persisted_inputs"] = {key: preset[key] for key in SCENARIO_INPUT_KEYS}
 
 
 def _collect_inputs():
@@ -645,13 +698,32 @@ def _build_preset_validation_rows():
 
 def _run_sanity_checks():
     derived = {name: _estimate_state(preset) for name, preset in PRESETS.items()}
+    baseline_inputs = PRESETS["Earth-like Baseline"]
+    carefree_inputs = PRESETS["Carefree Civilization"]
+    stabilization_inputs = PRESETS["Stabilization Policy"]
     baseline = derived["Earth-like Baseline"]
     carefree = derived["Carefree Civilization"]
     stabilization = derived["Stabilization Policy"]
     snowball = derived["Snowball-Prone World"]
     runaway = derived["Runaway-Prone World"]
 
+    earthlike_same_initial_state = all(
+        baseline_inputs[key] == carefree_inputs[key] == stabilization_inputs[key]
+        for key in EARTHLIKE_SHARED_INITIAL_KEYS
+    )
+    earthlike_policy_only_diff = (
+        set(baseline_inputs.keys()) == set(carefree_inputs.keys()) == set(stabilization_inputs.keys())
+        and all(
+            key in EARTHLIKE_POLICY_KEYS or (
+                baseline_inputs[key] == carefree_inputs[key] == stabilization_inputs[key]
+            )
+            for key in baseline_inputs
+        )
+    )
+
     checks = {
+        "earthlike_same_initial_state": earthlike_same_initial_state,
+        "earthlike_differ_only_by_policy": earthlike_policy_only_diff,
         "snowball_temp_below_baseline": snowball["temperature_k"] < baseline["temperature_k"],
         "runaway_temp_above_baseline": runaway["temperature_k"] > baseline["temperature_k"],
         "carefree_co2_above_baseline": carefree["projected_co2_ppm"] > baseline["projected_co2_ppm"],
@@ -749,10 +821,13 @@ def render_scenario_builder_page():
         _apply_preset(preset_name)
         st.rerun()
     if preset_cols[2].button("Reset to Default", type="secondary", use_container_width=True):
+        st.session_state["force_preset_name_once"] = "Earth-like Baseline"
         _apply_preset("Earth-like Baseline")
         st.rerun()
 
     current_inputs = _collect_inputs()
+    st.session_state["builder_persisted_inputs"] = dict(current_inputs)
+    st.session_state["builder_persisted_preset_name"] = str(st.session_state.get("preset_name", "Earth-like Baseline"))
     derived = _estimate_state(current_inputs)
 
     st.subheader("Current Predicted State")
@@ -905,8 +980,12 @@ def render_scenario_builder_page():
             if run_now:
                 st.session_state["texture_seed"] = int(np.random.randint(0, 1_000_000_000))
                 st.session_state["submitted"] = True
+                st.session_state["submitted_scenario_snapshot"] = dict(current_inputs)
                 st.session_state["params"] = runtime_payload
-                st.success("Simulation inputs captured.")
+                if hasattr(st, "switch_page"):
+                    st.switch_page("pages/01_Climate_Twin.py")
+                else:
+                    st.rerun()
 
             if save_pressed:
                 saved = st.session_state.setdefault("saved_scenarios", [])
