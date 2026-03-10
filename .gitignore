@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+*.pyc__pycache__/
+*.pyc
+
 # Virtual environment
 venv/
 .env/
