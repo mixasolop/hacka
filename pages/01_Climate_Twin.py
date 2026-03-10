@@ -1,3 +1,4 @@
+import json
 import time
 from math import log
 
@@ -71,6 +72,7 @@ HABITABILITY_PROFILES = {
 EMISSIONS_MODES = ("Constant", "Growing", "Carefree", "Stabilization", "Aggressive Mitigation")
 YEAR_KEY = "climate_twin_year"
 PLAY_KEY = "climate_twin_playing"
+SERIES_CACHE_KEY = "climate_twin_series_cache"
 HABITABILITY_LAT_BANDS = 181
 HABITABILITY_SOFT_MARGIN_C = 1.6
 TEMP_HOT_THRESHOLD_C = 32.0
@@ -605,6 +607,21 @@ def _safe_index(year: int, n: int):
     return max(0, min(int(year), n - 1))
 
 
+def _scenario_signature(params):
+    payload = {key: params[key] for key in SCENARIO_KEYS if key in params}
+    return json.dumps(payload, sort_keys=True)
+
+
+def _store_series_cache(params, series):
+    st.session_state[SERIES_CACHE_KEY] = {
+        "scenario_signature": _scenario_signature(params),
+        "time_years": np.asarray(series["time_years"], dtype=int).tolist(),
+        "global_temperature_c": np.asarray(series["global_temperature_c"], dtype=float).tolist(),
+        "co2_ppm": np.asarray(series["co2_ppm"], dtype=float).tolist(),
+        "habitable_surface_percent": np.asarray(series["habitable_surface_percent"], dtype=float).tolist(),
+    }
+
+
 def render_climate_twin_page():
     st.markdown("<style>[data-testid='stHeaderActionElements']{display:none;}</style>", unsafe_allow_html=True)
     st.title("Climate Twin")
@@ -612,6 +629,7 @@ def render_climate_twin_page():
 
     params = _load_current_scenario()
     series = simulate_time_series(params)
+    _store_series_cache(params, series)
     years = series["time_years"]
     events = series["events"]
     initial_conditions = series.get("initial_conditions", [])

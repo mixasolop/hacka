@@ -31,6 +31,9 @@ WEATHERING_COEFF = 0.94 * DEFAULT_WEATHERING_STRENGTH * 0.50
 WEATHERING_TEMP_SENS = 0.045
 BIOSPHERE_COEFF = 0.94 * DEFAULT_BIOSPHERE_UPTAKE_STRENGTH * 0.50
 EMISSIONS_TO_PPM_PER_YEAR = 1.0
+CO2_HUMAN_MAX_SAFE_PPM = 1000.0
+CLIMATE_TWIN_SERIES_CACHE_KEY = "climate_twin_series_cache"
+CLIMATE_TWIN_YEAR_KEY = "climate_twin_year"
 
 SCENARIO_KEYS = (
     "stellar_flux_multiplier",
@@ -112,6 +115,40 @@ def _load_current_scenario():
     if params["habitable_temp_max_c"] <= params["habitable_temp_min_c"]:
         params["habitable_temp_max_c"] = params["habitable_temp_min_c"] + 1.0
     return params
+
+
+def _scenario_signature(params):
+    payload = {key: params[key] for key in SCENARIO_KEYS if key in params}
+    return json.dumps(payload, sort_keys=True)
+
+
+def _load_climate_twin_series_cache(params):
+    cache = st.session_state.get(CLIMATE_TWIN_SERIES_CACHE_KEY)
+    if not isinstance(cache, dict):
+        return None
+
+    if str(cache.get("scenario_signature", "")) != _scenario_signature(params):
+        return None
+
+    try:
+        years = np.asarray(cache.get("time_years", []), dtype=int)
+        global_temp_c = np.asarray(cache.get("global_temperature_c", []), dtype=float)
+        global_co2_ppm = np.asarray(cache.get("co2_ppm", []), dtype=float)
+        habitable_surface_percent = np.asarray(cache.get("habitable_surface_percent", []), dtype=float)
+    except Exception:
+        return None
+
+    n = int(len(years))
+    if n == 0:
+        return None
+    if len(global_temp_c) != n or len(global_co2_ppm) != n or len(habitable_surface_percent) != n:
+        return None
+    return {
+        "years": years,
+        "global_temperature_c": global_temp_c,
+        "co2_ppm": global_co2_ppm,
+        "habitable_surface_percent": habitable_surface_percent,
+    }
 
 
 def _soft_step(x):
@@ -378,11 +415,22 @@ def _co2_suitability(tile_co2_ppm: np.ndarray):
     return np.clip(score, 0.0, 1.0)
 
 
+def _temperature_hard_constraint(local_temp_c: np.ndarray, tmin_c: float, tmax_c: float):
+    return (local_temp_c >= tmin_c) & (local_temp_c <= tmax_c)
+
+
+def _co2_hard_constraint(tile_co2_ppm: np.ndarray):
+    return tile_co2_ppm <= CO2_HUMAN_MAX_SAFE_PPM
+
+
 def _human_habitability(local_temp_c: np.ndarray, tile_co2_ppm: np.ndarray, params):
+    temp_ok = _temperature_hard_constraint(local_temp_c, params["habitable_temp_min_c"], params["habitable_temp_max_c"])
+    co2_ok = _co2_hard_constraint(tile_co2_ppm)
     temp_score = _temperature_suitability(local_temp_c, params["habitable_temp_min_c"], params["habitable_temp_max_c"])
     co2_score = _co2_suitability(tile_co2_ppm)
     score = np.clip(temp_score * co2_score, 0.0, 1.0)
-    return score, temp_score, co2_score
+    score = np.where(temp_ok & co2_ok, score, 0.0)
+    return score, temp_score, co2_score, temp_ok, co2_ok
 
 
 def _habitability_map(
@@ -459,14 +507,26 @@ def render_map_page():
 
     params = _load_current_scenario()
     payload = json.dumps(params, sort_keys=True)
-    sim = _simulate_global_series(payload)
+    climate_cache = _load_climate_twin_series_cache(params)
+    if climate_cache is None:
+        sim = _simulate_global_series(payload)
+        years = np.array(sim["years"], dtype=int)
+        global_temp_c = np.array(sim["temp_c"], dtype=float)
+        global_co2_ppm = np.array(sim["co2_ppm"], dtype=float)
+        official_habitable_pct_series = None
+    else:
+        years = np.asarray(climate_cache["years"], dtype=int)
+        global_temp_c = np.asarray(climate_cache["global_temperature_c"], dtype=float)
+        global_co2_ppm = np.asarray(climate_cache["co2_ppm"], dtype=float)
+        official_habitable_pct_series = np.asarray(climate_cache["habitable_surface_percent"], dtype=float)
+
     texture_seed = _texture_seed_for_map(payload)
     # Use the same texture seed as screen 1; water/land boundaries then match that planet.
-    geo = _generate_geography(texture_seed=texture_seed, texture_temp_c=float(sim["temp_c"][min(100, len(sim["temp_c"]) - 1)]))
+    geo = _generate_geography(
+        texture_seed=texture_seed,
+        texture_temp_c=float(global_temp_c[min(100, len(global_temp_c) - 1)]),
+    )
 
-    years = np.array(sim["years"], dtype=int)
-    global_temp_c = np.array(sim["temp_c"], dtype=float)
-    global_co2_ppm = np.array(sim["co2_ppm"], dtype=float)
     lat_deg = np.array(geo["lat_deg"], dtype=float)
     lon_deg = np.array(geo["lon_deg"], dtype=float)
     elevation_km = np.array(geo["elevation_km"], dtype=float)
@@ -474,13 +534,21 @@ def render_map_page():
     land_mask = np.array(geo["land_mask"], dtype=float) >= 0.5
 
     controls = st.columns([2.0, 1.7, 1.4, 1.2])
+    default_year = int(
+        np.clip(
+            st.session_state.get(CLIMATE_TWIN_YEAR_KEY, min(100, int(years[-1]))),
+            int(years[0]),
+            int(years[-1]),
+        )
+    )
     year = controls[0].slider(
         "Year",
         min_value=int(years[0]),
         max_value=int(years[-1]),
-        value=min(100, int(years[-1])),
+        value=default_year,
         step=1,
     )
+    st.session_state[CLIMATE_TWIN_YEAR_KEY] = int(year)
     livable_threshold = controls[1].slider(
         "Livable Threshold",
         min_value=0.30,
@@ -493,9 +561,15 @@ def render_map_page():
     auto_center = controls[3].toggle("Auto Center", value=True)
 
     idx = int(np.argmin(np.abs(years - year)))
+    official_habitable_pct = None
+    official_habitability_score = None
+    if official_habitable_pct_series is not None and idx < len(official_habitable_pct_series):
+        official_habitable_pct = float(np.clip(official_habitable_pct_series[idx], 0.0, 100.0))
+        official_habitability_score = official_habitable_pct / 100.0
+
     temp_grid_c = _local_temperature_c(global_temp_c[idx], lat_deg, elevation_km, microclimate_c, params)
     tile_co2 = _tile_co2_ppm(float(global_co2_ppm[idx]), elevation_km)
-    score, temp_score, co2_score = _human_habitability(temp_grid_c, tile_co2, params)
+    score, temp_score, co2_score, temp_ok, co2_ok = _human_habitability(temp_grid_c, tile_co2, params)
     # Hard constraint from user requirement: water is always unlivable.
     score = np.where(land_mask, score, 0.0)
 
@@ -516,25 +590,51 @@ def render_map_page():
         st.subheader("Map Statistics")
         livable_mask = (score >= livable_threshold) & land_mask
         perfect_mask = score >= 0.80
+        hard_unlivable_mask = (~temp_ok | ~co2_ok) & land_mask
         land_fraction = 100.0 * float(np.mean(land_mask))
         livable_on_land = 100.0 * float(np.sum(livable_mask) / max(1.0, np.sum(land_mask)))
-        st.markdown(
-            "\n".join(
+        hard_unlivable_on_land = 100.0 * float(np.sum(hard_unlivable_mask) / max(1.0, np.sum(land_mask)))
+        map_livable_global_pct = 100.0 * float(np.mean(livable_mask))
+        map_mean_score = float(np.mean(score))
+        stats_lines = [
+            f"- Texture seed (same as screen 1): {texture_seed}",
+            f"- Land area: {land_fraction:.1f}% (water is forced unlivable)",
+            f"- Global temperature: {float(global_temp_c[idx]):.2f} C",
+            f"- Global CO2: {float(global_co2_ppm[idx]):.1f} ppm",
+        ]
+        if official_habitable_pct is not None and official_habitability_score is not None:
+            stats_lines.extend(
                 [
-                    f"- Texture seed (same as screen 1): {texture_seed}",
-                    f"- Land area: {land_fraction:.1f}% (water is forced unlivable)",
-                    f"- Global temperature: {float(global_temp_c[idx]):.2f} C",
-                    f"- Global CO2: {float(global_co2_ppm[idx]):.1f} ppm",
-                    f"- Mean habitability score: {float(np.mean(score)):.3f} (static 0 to 1)",
-                    f"- Livable area (score >= {livable_threshold:.2f}): {100.0 * float(np.mean(livable_mask)):.1f}%",
-                    f"- Livable fraction of land: {livable_on_land:.1f}%",
-                    f"- Perfect area (score >= 0.80): {100.0 * float(np.mean(perfect_mask)):.1f}%",
-                    f"- Tile temperature range: {float(np.min(temp_grid_c)):.2f} to {float(np.max(temp_grid_c)):.2f} C",
-                    f"- Tile CO2 range: {float(np.min(tile_co2)):.0f} to {float(np.max(tile_co2)):.0f} ppm",
-                    f"- Mean temperature suitability: {float(np.mean(temp_score)):.3f}",
-                    f"- Mean CO2 suitability: {float(np.mean(co2_score)):.3f}",
+                    f"- Mean habitability score (from Climate Twin): {official_habitability_score:.3f}",
+                    f"- Livable area (from Climate Twin): {official_habitable_pct:.1f}%",
                 ]
             )
+        else:
+            stats_lines.extend(
+                [
+                    f"- Mean habitability score (map fallback): {map_mean_score:.3f}",
+                    f"- Livable area (map fallback, score >= {livable_threshold:.2f}): {map_livable_global_pct:.1f}%",
+                    "- Climate Twin cache not found for this scenario. Open screen 01 to sync exact habitability values.",
+                ]
+            )
+        stats_lines.extend(
+            [
+                f"- Map livable area (score >= {livable_threshold:.2f}): {map_livable_global_pct:.1f}%",
+                f"- Livable fraction of land: {livable_on_land:.1f}%",
+                f"- Perfect area (score >= 0.80): {100.0 * float(np.mean(perfect_mask)):.1f}%",
+                (
+                    f"- Hard red area on land (temp outside {params['habitable_temp_min_c']:.1f} to "
+                    f"{params['habitable_temp_max_c']:.1f} C OR CO2 > {CO2_HUMAN_MAX_SAFE_PPM:.0f} ppm): "
+                    f"{hard_unlivable_on_land:.1f}%"
+                ),
+                f"- Tile temperature range: {float(np.min(temp_grid_c)):.2f} to {float(np.max(temp_grid_c)):.2f} C",
+                f"- Tile CO2 range: {float(np.min(tile_co2)):.0f} to {float(np.max(tile_co2)):.0f} ppm",
+                f"- Mean temperature suitability: {float(np.mean(temp_score)):.3f}",
+                f"- Mean CO2 suitability: {float(np.mean(co2_score)):.3f}",
+            ]
+        )
+        st.markdown(
+            "\n".join(stats_lines)
         )
 
 
