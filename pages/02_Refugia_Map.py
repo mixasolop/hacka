@@ -8,13 +8,15 @@ import plotly.io as pio
 import streamlit as st
 import streamlit.components.v1 as components
 
+from climate_observations import get_observed_climate_baseline
+
 st.set_page_config(page_title="Refugia Map", layout="wide")
 
 SIM_YEARS = 500
 SIM_DT_YEARS = 1.0
 TEMPERATURE_RESPONSE_YEARS = 12.0
 
-CO2_BASELINE_PPM = 280.0
+CO2_BASELINE_PPM = 278.0
 REFERENCE_TEMP_C = 14.8
 ALBEDO_REF = 0.30
 DEFAULT_SEASONALITY_AMPLITUDE = 0.12
@@ -100,6 +102,8 @@ EARTH_ANTARCTICA_LAT_CUTOFF = -70.0
 
 def _load_current_scenario():
     params = dict(DEFAULT_SCENARIO)
+    observed = get_observed_climate_baseline()
+    params["initial_co2_ppm"] = float(observed.get("co2_ppm_latest", params["initial_co2_ppm"]))
 
     scenario_source = None
     payload = st.session_state.get("params")

@@ -7,10 +7,12 @@ import plotly.io as pio
 import streamlit as st
 import streamlit.components.v1 as components
 
+from climate_observations import get_observed_climate_baseline
+
 st.set_page_config(page_title="Scenario Builder", layout="wide")
 
 SOLAR_CONSTANT = 1361.0
-CO2_BASELINE_PPM = 280.0
+CO2_BASELINE_PPM = 278.0
 PREVIEW_HORIZON_YEARS = 100
 REFERENCE_TEMP_C = 14.8
 ALBEDO_REF = 0.30
@@ -492,6 +494,14 @@ if (plot) {{
 
 
 def _initialize_state():
+    observed = get_observed_climate_baseline()
+    observed_co2 = float(observed.get("co2_ppm_latest", PRESETS["Earth-like Baseline"]["initial_co2_ppm"]))
+    # Keep Earth-like presets synchronized to observed present-day CO2.
+    for preset_name in ("Earth-like Baseline", "Carefree Civilization", "Stabilization Policy"):
+        if preset_name in PRESETS:
+            PRESETS[preset_name]["initial_co2_ppm"] = round(observed_co2, 1)
+
+    st.session_state["observed_climate_baseline"] = observed
     defaults = PRESETS["Earth-like Baseline"]
     forced_preset_name = st.session_state.pop("force_preset_name_once", None)
     persisted_inputs = st.session_state.get("builder_persisted_inputs")
@@ -901,6 +911,25 @@ def render_scenario_builder_page():
 
     st.markdown("<h1 style='margin:0;'>Scenario Builder</h1>", unsafe_allow_html=True)
     st.caption("Define a planetary climate-biosphere-civilization scenario and launch the digital twin.")
+    observed = st.session_state.get("observed_climate_baseline", {})
+    co2_latest = float(observed.get("co2_ppm_latest", PRESETS["Earth-like Baseline"]["initial_co2_ppm"]))
+    co2_obs = observed.get("co2_observation")
+    temp_anomaly = observed.get("gistemp_latest_anomaly_c")
+    temp_obs = observed.get("gistemp_observation")
+    co2_date = (
+        f"{int(co2_obs['year'])}-{int(co2_obs['month']):02d}"
+        if isinstance(co2_obs, dict) and "year" in co2_obs and "month" in co2_obs
+        else "n/a"
+    )
+    temp_date = (
+        f"{int(temp_obs['year'])}-{int(temp_obs['month']):02d}"
+        if isinstance(temp_obs, dict) and "year" in temp_obs and "month" in temp_obs
+        else "n/a"
+    )
+    anomaly_text = f"{float(temp_anomaly):+.2f} C" if temp_anomaly is not None else "n/a"
+    st.caption(
+        f"Live baseline sync: NOAA CO2 {co2_latest:.2f} ppm ({co2_date}) | NASA GISTEMP anomaly {anomaly_text} ({temp_date})."
+    )
 
     st.markdown("**Preset Library**")
     preset_cols = st.columns([1.8, 1.0, 1.0])

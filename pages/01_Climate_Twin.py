@@ -6,6 +6,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+from climate_observations import get_observed_climate_baseline
+
 st.set_page_config(page_title="Climate Twin", layout="wide")
 
 SIM_YEARS = 500
@@ -13,7 +15,7 @@ SIM_DT_YEARS = 1.0
 TEMPERATURE_RESPONSE_YEARS = 12.0
 
 SOLAR_CONSTANT = 1361.0
-CO2_BASELINE_PPM = 280.0
+CO2_BASELINE_PPM = 278.0
 REFERENCE_TEMP_C = 14.8
 ALBEDO_REF = 0.30
 DEFAULT_SEASONALITY_AMPLITUDE = 0.12
@@ -109,6 +111,8 @@ def _kpi_card(label: str, value: str, status: str):
 
 def _load_current_scenario():
     params = dict(DEFAULT_SCENARIO)
+    observed = get_observed_climate_baseline()
+    params["initial_co2_ppm"] = float(observed.get("co2_ppm_latest", params["initial_co2_ppm"]))
 
     scenario_source = None
     payload = st.session_state.get("params")
@@ -626,6 +630,14 @@ def render_climate_twin_page():
     st.markdown("<style>[data-testid='stHeaderActionElements']{display:none;}</style>", unsafe_allow_html=True)
     st.title("Climate Twin")
     st.caption("Track temperature, atmospheric CO\u2082, and habitable surface through time.")
+    observed = get_observed_climate_baseline()
+    co2_obs = observed.get("co2_observation")
+    co2_date = (
+        f"{int(co2_obs['year'])}-{int(co2_obs['month']):02d}"
+        if isinstance(co2_obs, dict) and "year" in co2_obs and "month" in co2_obs
+        else "n/a"
+    )
+    st.caption(f"Default initial CO\u2082 is synced to observed NOAA value: {float(observed.get('co2_ppm_latest', 420.0)):.2f} ppm ({co2_date}).")
 
     params = _load_current_scenario()
     series = simulate_time_series(params)
