@@ -765,7 +765,7 @@ def render_climate_twin_page():
         min_value=0,
         max_value=SIM_YEARS,
         value=int(st.session_state[YEAR_KEY]),
-        step=1,
+        step=10,
     )
     if int(selected_year) != int(st.session_state[YEAR_KEY]):
         st.session_state[YEAR_KEY] = int(selected_year)
@@ -791,8 +791,8 @@ def render_climate_twin_page():
             st.session_state[PLAY_KEY] = False
         else:
             # Lower update frequency reduces visible full-page flicker during Streamlit reruns.
-            time.sleep(0.14)
-            st.session_state[YEAR_KEY] = int(st.session_state[YEAR_KEY] + 1)
+            time.sleep(0.07)
+            st.session_state[YEAR_KEY] = int(min(SIM_YEARS, st.session_state[YEAR_KEY] + 10))
             st.rerun()
 
 
