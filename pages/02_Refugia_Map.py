@@ -82,6 +82,20 @@ PLANET_VIEW_LAT = 26
 PLANET_VIEW_LON = -39
 PLANET_VIEW_ROLL = 23.5
 MAP_SPIN_SPEED_DEG_PER_SEC = 10.2
+EARTH_SCENARIO_PRESETS = {
+    "Earth-like Baseline",
+    "Carefree Civilization",
+    "Stabilization Policy",
+}
+EARTHLIKE_GEOGRAPHY_ANCHOR = {
+    "stellar_flux_multiplier": 1.00,
+    "enable_seasonality": True,
+    "warm_albedo": 0.30,
+    "ice_albedo": 0.62,
+    "initial_co2_ppm": 420.0,
+}
+EARTH_CONTINENT_THRESHOLD = 1.18
+EARTH_ANTARCTICA_LAT_CUTOFF = -70.0
 
 
 def _load_current_scenario():
@@ -413,27 +427,182 @@ def _texture_seed_for_map(params_payload: str):
         return _seed_from_payload(params_payload)
 
 
+def _is_earth_geography_mode(params):
+    preset_name = str(st.session_state.get("builder_persisted_preset_name", "")).strip()
+    if preset_name in EARTH_SCENARIO_PRESETS:
+        return True
+
+    return (
+        abs(float(params["stellar_flux_multiplier"]) - EARTHLIKE_GEOGRAPHY_ANCHOR["stellar_flux_multiplier"]) <= 0.06
+        and bool(params["enable_seasonality"]) == bool(EARTHLIKE_GEOGRAPHY_ANCHOR["enable_seasonality"])
+        and abs(float(params["warm_albedo"]) - EARTHLIKE_GEOGRAPHY_ANCHOR["warm_albedo"]) <= 0.07
+        and abs(float(params["ice_albedo"]) - EARTHLIKE_GEOGRAPHY_ANCHOR["ice_albedo"]) <= 0.11
+        and abs(float(params["initial_co2_ppm"]) - EARTHLIKE_GEOGRAPHY_ANCHOR["initial_co2_ppm"]) <= 220.0
+    )
+
+
+def _wrapped_lon_delta_deg(lon_deg: np.ndarray, center_lon_deg: float):
+    return (lon_deg - center_lon_deg + 180.0) % 360.0 - 180.0
+
+
+def _gaussian_blob(
+    lon_grid_deg: np.ndarray,
+    lat_grid_deg: np.ndarray,
+    center_lon_deg: float,
+    center_lat_deg: float,
+    sigma_lon_deg: float,
+    sigma_lat_deg: float,
+):
+    dlon = _wrapped_lon_delta_deg(lon_grid_deg, center_lon_deg) / max(1e-6, float(sigma_lon_deg))
+    dlat = (lat_grid_deg - center_lat_deg) / max(1e-6, float(sigma_lat_deg))
+    return np.exp(-0.5 * (dlon**2 + dlat**2))
+
+
+def _earth_like_land_mask(lat_deg: np.ndarray, lon_deg: np.ndarray):
+    lon_grid_deg, lat_grid_deg = np.meshgrid(lon_deg, lat_deg)
+    continent_blobs = (
+        (-112.0, 52.0, 26.0, 18.0, 1.20),
+        (-98.0, 35.0, 30.0, 15.0, 1.00),
+        (-76.0, 45.0, 19.0, 13.0, 0.80),
+        (-92.0, 18.0, 16.0, 10.0, 0.60),
+        (-42.0, 72.0, 16.0, 9.0, 0.90),
+        (-61.0, -14.0, 18.0, 25.0, 1.35),
+        (-75.0, -31.0, 10.0, 18.0, 0.75),
+        (-52.0, -37.0, 13.0, 9.0, 0.50),
+        (10.0, 50.0, 18.0, 11.0, 0.90),
+        (38.0, 54.0, 24.0, 14.0, 1.00),
+        (68.0, 54.0, 27.0, 15.0, 1.00),
+        (95.0, 52.0, 30.0, 16.0, 1.00),
+        (122.0, 45.0, 20.0, 13.0, 0.80),
+        (104.0, 23.0, 20.0, 12.0, 0.75),
+        (78.0, 23.0, 14.0, 10.0, 0.70),
+        (48.0, 24.0, 11.0, 8.0, 0.50),
+        (18.0, 9.0, 23.0, 25.0, 1.20),
+        (24.0, -14.0, 18.0, 20.0, 1.00),
+        (7.0, 26.0, 14.0, 10.0, 0.70),
+        (47.0, -20.0, 4.0, 6.0, 0.30),
+        (134.0, -25.0, 17.0, 10.0, 1.00),
+        (146.0, -18.0, 9.0, 7.0, 0.45),
+    )
+
+    field = np.zeros_like(lon_grid_deg, dtype=float)
+    for lon0, lat0, sigma_lon, sigma_lat, weight in continent_blobs:
+        field += weight * _gaussian_blob(
+            lon_grid_deg,
+            lat_grid_deg,
+            center_lon_deg=lon0,
+            center_lat_deg=lat0,
+            sigma_lon_deg=sigma_lon,
+            sigma_lat_deg=sigma_lat,
+        )
+
+    land = field > EARTH_CONTINENT_THRESHOLD
+    land |= lat_grid_deg <= EARTH_ANTARCTICA_LAT_CUTOFF
+
+    # Remove over-smoothed artifacts for major seas and gulfs.
+    mediterranean = _gaussian_blob(lon_grid_deg, lat_grid_deg, 16.0, 36.0, 20.0, 7.0)
+    gulf_of_mexico = _gaussian_blob(lon_grid_deg, lat_grid_deg, -90.0, 24.0, 12.0, 7.0)
+    red_sea = _gaussian_blob(lon_grid_deg, lat_grid_deg, 38.0, 20.0, 5.0, 8.0)
+    bay_of_bengal = _gaussian_blob(lon_grid_deg, lat_grid_deg, 90.0, 16.0, 10.0, 8.0)
+    land &= ~(mediterranean > 0.72)
+    land &= ~(
+        (gulf_of_mexico > 0.70)
+        & (lat_grid_deg < 31.0)
+        & (lat_grid_deg > 18.0)
+        & (lon_grid_deg > -98.0)
+        & (lon_grid_deg < -80.0)
+    )
+    land &= ~(red_sea > 0.80)
+    land &= ~(bay_of_bengal > 0.86)
+
+    return land, np.clip(field / EARTH_CONTINENT_THRESHOLD, 0.0, None)
+
+
+def _generate_earth_like_geography(lat_deg: np.ndarray, lon_deg: np.ndarray):
+    lon_grid_deg, lat_grid_deg = np.meshgrid(lon_deg, lat_deg)
+    lon_grid_rad = np.deg2rad(lon_grid_deg)
+    lat_grid_rad = np.deg2rad(lat_grid_deg)
+    land_mask, continent_strength = _earth_like_land_mask(lat_deg, lon_deg)
+
+    interiorness = np.clip((continent_strength - 1.05) / 0.8, 0.0, 1.0)
+
+    mountain_field = np.zeros_like(continent_strength, dtype=float)
+    mountain_ridges = (
+        (-112.0, 40.0, 10.0, 18.0, 0.85),  # Rockies
+        (-72.0, -20.0, 7.0, 26.0, 1.00),   # Andes
+        (84.0, 30.0, 11.0, 8.0, 1.10),     # Himalaya/Tibet
+        (10.0, 46.0, 8.0, 5.0, 0.45),      # Alps
+        (36.0, 3.0, 8.0, 14.0, 0.40),      # East African highlands
+        (147.0, -25.0, 8.0, 10.0, 0.35),   # Great Dividing Range
+    )
+    for lon0, lat0, sigma_lon, sigma_lat, weight in mountain_ridges:
+        mountain_field += weight * _gaussian_blob(
+            lon_grid_deg,
+            lat_grid_deg,
+            center_lon_deg=lon0,
+            center_lat_deg=lat0,
+            sigma_lon_deg=sigma_lon,
+            sigma_lat_deg=sigma_lat,
+        )
+    mountain_field = np.clip(mountain_field, 0.0, 1.0)
+    mountain = np.where(land_mask, np.clip(0.22 + 0.78 * mountain_field, 0.0, 1.0), 0.0)
+
+    land_height = np.where(
+        land_mask,
+        np.clip(0.24 + 0.46 * interiorness + 0.30 * mountain_field, 0.0, 1.0),
+        0.0,
+    )
+    ocean_depth = np.where(land_mask, 0.0, np.clip(1.0 - continent_strength, 0.0, 1.0))
+
+    pacific_trench = _gaussian_blob(lon_grid_deg, lat_grid_deg, -150.0, 20.0, 40.0, 22.0)
+    atlantic_trench = _gaussian_blob(lon_grid_deg, lat_grid_deg, -20.0, 5.0, 38.0, 26.0)
+    indian_trench = _gaussian_blob(lon_grid_deg, lat_grid_deg, 80.0, -20.0, 32.0, 18.0)
+    trench_enhancement = 0.18 * pacific_trench + 0.12 * atlantic_trench + 0.16 * indian_trench
+    ocean_depth = np.where(land_mask, 0.0, np.clip(ocean_depth + trench_enhancement, 0.0, 1.0))
+
+    elevation_km = np.where(
+        land_mask,
+        0.12 + 3.6 * land_height + 3.1 * mountain,
+        -0.25 - 5.3 * ocean_depth,
+    )
+    elevation_km = np.clip(elevation_km, -5.8, 8.6)
+
+    coastal_moderation = np.where(land_mask, np.clip(1.0 - interiorness, 0.0, 1.0), 0.0)
+    microclimate_c = (
+        0.95 * np.sin(2.2 * lon_grid_rad) * np.cos(lat_grid_rad)
+        + 0.62 * np.sin(5.0 * lon_grid_rad + 0.5) * np.cos(2.0 * lat_grid_rad)
+        + 0.75 * mountain
+        - 0.35 * ocean_depth
+        - 0.28 * coastal_moderation
+    )
+
+    return elevation_km, microclimate_c, land_mask
+
+
 @st.cache_data(show_spinner=False)
-def _generate_geography(texture_seed: int, texture_temp_c: float):
+def _generate_geography(texture_seed: int, texture_temp_c: float, earth_geography: bool = False):
     nlat = 72
     nlon = 144
     lat_deg = np.linspace(-89.0, 89.0, nlat, dtype=float)
     lon_deg = np.linspace(-180.0, 180.0, nlon, endpoint=False, dtype=float)
-    lon2, lat2 = np.meshgrid(np.deg2rad(lon_deg), np.deg2rad(lat_deg))
-    land, land_height, ocean_depth, mountain, relief = _planet_surface_fields(
-        lon=lon2,
-        lat=lat2,
-        seed=int(texture_seed),
-        temp_c=float(texture_temp_c),
-    )
+    if earth_geography:
+        elevation_km, microclimate_c, land = _generate_earth_like_geography(lat_deg, lon_deg)
+    else:
+        lon2, lat2 = np.meshgrid(np.deg2rad(lon_deg), np.deg2rad(lat_deg))
+        land, land_height, ocean_depth, mountain, relief = _planet_surface_fields(
+            lon=lon2,
+            lat=lat2,
+            seed=int(texture_seed),
+            temp_c=float(texture_temp_c),
+        )
 
-    elevation_km = np.where(
-        land,
-        0.25 + 5.8 * land_height + 2.2 * mountain,
-        -5.2 * ocean_depth,
-    )
-    elevation_km = np.clip(elevation_km, -5.5, 8.0)
-    microclimate_c = 1.1 * np.sin(4.0 * lon2) * np.cos(lat2) + 0.8 * mountain - 0.35 * ocean_depth + 0.6 * relief
+        elevation_km = np.where(
+            land,
+            0.25 + 5.8 * land_height + 2.2 * mountain,
+            -5.2 * ocean_depth,
+        )
+        elevation_km = np.clip(elevation_km, -5.5, 8.0)
+        microclimate_c = 1.1 * np.sin(4.0 * lon2) * np.cos(lat2) + 0.8 * mountain - 0.35 * ocean_depth + 0.6 * relief
 
     return {
         "lat_deg": lat_deg.tolist(),
@@ -616,26 +785,29 @@ def _habitability_map(
 def render_map_page():
     st.markdown("<style>[data-testid='stHeaderActionElements']{display:none;}</style>", unsafe_allow_html=True)
     st.title("Refugia Map")
-    st.caption("Shows where humankind can live based on tile temperature and CO2 stress, with static red-to-green scale.")
+    st.caption("Uses Climate Twin outputs for global climate values and maps local livability on top.")
 
     params = _load_current_scenario()
     payload = json.dumps(params, sort_keys=True)
     climate_cache = _load_climate_twin_series_cache(params)
     if climate_cache is None:
-        sim = _simulate_global_series(payload)
-        years = np.array(sim["years"], dtype=int)
-        global_temp_c = np.array(sim["temp_c"], dtype=float)
-        global_co2_ppm = np.array(sim["co2_ppm"], dtype=float)
-    else:
-        years = np.asarray(climate_cache["years"], dtype=int)
-        global_temp_c = np.asarray(climate_cache["global_temperature_c"], dtype=float)
-        global_co2_ppm = np.asarray(climate_cache["co2_ppm"], dtype=float)
+        st.warning(
+            "Climate Twin data is missing for this scenario. Open the 'Climate Twin' page first to generate it, then return here."
+        )
+        st.stop()
 
+    years = np.asarray(climate_cache["years"], dtype=int)
+    global_temp_c = np.asarray(climate_cache["global_temperature_c"], dtype=float)
+    global_co2_ppm = np.asarray(climate_cache["co2_ppm"], dtype=float)
+    global_habitable_pct = np.asarray(climate_cache["habitable_surface_percent"], dtype=float)
+
+    earth_geography_mode = _is_earth_geography_mode(params)
     texture_seed = _texture_seed_for_map(payload)
-    # Use the same texture seed as screen 1; water/land boundaries then match that planet.
+    # Earth-like scenarios use continent-anchored geography; others keep the procedural world from screen 1.
     geo = _generate_geography(
         texture_seed=texture_seed,
         texture_temp_c=float(global_temp_c[min(100, len(global_temp_c) - 1)]),
+        earth_geography=earth_geography_mode,
     )
 
     lat_deg = np.array(geo["lat_deg"], dtype=float)
@@ -671,11 +843,7 @@ def render_map_page():
     show_livable_only = controls[2].toggle("Show Livable Only", value=False)
 
     idx = int(np.argmin(np.abs(years - year)))
-    climate_twin_habitable_pct = _climate_twin_habitability_percent(
-        float(global_temp_c[idx]),
-        float(global_co2_ppm[idx]),
-        params,
-    )
+    climate_twin_habitable_pct = float(global_habitable_pct[idx])
     climate_twin_habitability_score = climate_twin_habitable_pct / 100.0
 
     temp_grid_c = _local_temperature_c(global_temp_c[idx], lat_deg, elevation_km, microclimate_c, params)
@@ -714,13 +882,23 @@ def render_map_page():
         hard_unlivable_on_land = 100.0 * float(np.sum(hard_unlivable_mask) / max(1.0, np.sum(land_mask)))
         map_livable_global_pct = float(climate_twin_habitable_pct)
         threshold_livable_global_pct = 100.0 * float(np.mean(livable_mask))
+        geography_line = (
+            "- Geography mode: Earth-continent anchored (for Earth-like scenarios)."
+            if earth_geography_mode
+            else "- Geography mode: Procedural world (same texture seed as screen 1)."
+        )
         stats_lines = [
-            f"- Texture seed (same as screen 1): {texture_seed}",
+            geography_line,
+            (
+                "- Texture seed: not used in Earth-continent mode"
+                if earth_geography_mode
+                else f"- Texture seed (same as screen 1): {texture_seed}"
+            ),
             f"- Land area: {land_fraction:.1f}% (water is forced unlivable)",
             f"- Global temperature: {float(global_temp_c[idx]):.2f} C",
             f"- Global CO2: {float(global_co2_ppm[idx]):.1f} ppm",
-            f"- Mean habitability score (Climate Twin formula): {climate_twin_habitability_score:.3f}",
-            f"- Non-red area (Climate Twin formula): {map_livable_global_pct:.1f}%",
+            f"- Mean habitability score (from Climate Twin page): {climate_twin_habitability_score:.3f}",
+            f"- Non-red area (from Climate Twin page): {map_livable_global_pct:.1f}%",
         ]
         stats_lines.extend(
             [
