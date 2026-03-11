@@ -4,7 +4,9 @@ from math import log
 
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Refugia Map", layout="wide")
 
@@ -78,6 +80,8 @@ HUMAN_HABITABILITY_COLORSCALE = [
 ]
 PLANET_VIEW_LAT = 26
 PLANET_VIEW_LON = -39
+PLANET_VIEW_ROLL = 23.5
+MAP_SPIN_SPEED_DEG_PER_SEC = 6.0
 
 
 def _load_current_scenario():
@@ -150,6 +154,74 @@ def _load_climate_twin_series_cache(params):
         "co2_ppm": global_co2_ppm,
         "habitable_surface_percent": habitable_surface_percent,
     }
+
+
+def _render_spinning_geo(fig: go.Figure, component_key: str, height_px: int):
+    div_id = f"{component_key}_plot"
+    # Client-side spin keeps the rest of the Streamlit UI responsive.
+    post_script = f"""
+const plot = document.getElementById('{div_id}');
+if (plot) {{
+  let spinning = true;
+  const speedDegPerSec = {MAP_SPIN_SPEED_DEG_PER_SEC:.3f};
+  let angleDeg = ((plot.layout?.geo?.projection?.rotation?.lon ?? {PLANET_VIEW_LON:.3f}) + 360.0) % 360.0;
+  let lastTs = performance.now();
+  let internalUpdate = false;
+  let pending = false;
+  const stop = () => {{ spinning = false; }};
+  plot.addEventListener('pointerdown', stop, {{ passive: true }});
+  plot.addEventListener('wheel', stop, {{ passive: true }});
+  plot.addEventListener('touchstart', stop, {{ passive: true }});
+  plot.on('plotly_click', stop);
+  plot.on('plotly_doubleclick', stop);
+  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) stop(); }});
+  plot.on('plotly_relayout', (ev) => {{
+    if (internalUpdate) return;
+    if (!ev) return;
+    if (Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.lon') ||
+        Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.lat') ||
+        Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.roll')) {{
+      stop();
+    }}
+  }});
+  const applyRotation = () => {{
+    if (pending) return;
+    pending = true;
+    internalUpdate = true;
+    const finalize = () => {{
+      pending = false;
+      internalUpdate = false;
+    }};
+    const result = Plotly.relayout(plot, {{ 'geo.projection.rotation.lon': angleDeg }});
+    if (result && typeof result.then === 'function') {{
+      result.then(finalize).catch(finalize);
+    }} else {{
+      finalize();
+    }}
+  }};
+  const tick = (ts) => {{
+    const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
+    lastTs = ts;
+    if (spinning) {{
+      angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
+      applyRotation();
+    }}
+    requestAnimationFrame(tick);
+  }};
+  requestAnimationFrame(tick);
+}}
+"""
+    html = pio.to_html(
+        fig,
+        include_plotlyjs="inline",
+        full_html=False,
+        default_width="100%",
+        default_height=f"{int(height_px)}px",
+        div_id=div_id,
+        post_script=post_script,
+        config={"displayModeBar": True, "responsive": True},
+    )
+    components.html(html, height=int(height_px) + 12, scrolling=False)
 
 
 def _soft_step(x):
@@ -524,13 +596,14 @@ def _habitability_map(
         title=f"Human Livability Map - Year {year}",
         paper_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#d9e3f5"),
+        clickmode="event+select",
         geo=dict(
             projection_type="orthographic",
             showland=False,
             showcoastlines=False,
             showocean=True,
             oceancolor="#0f1626",
-            projection_rotation=dict(lat=PLANET_VIEW_LAT, lon=PLANET_VIEW_LON),
+            projection_rotation=dict(lat=PLANET_VIEW_LAT, lon=PLANET_VIEW_LON, roll=PLANET_VIEW_ROLL),
             bgcolor="rgba(0,0,0,0)",
             lataxis_showgrid=False,
             lonaxis_showgrid=False,
@@ -570,7 +643,7 @@ def render_map_page():
     microclimate_c = np.array(geo["microclimate_c"], dtype=float)
     land_mask = np.array(geo["land_mask"], dtype=float) >= 0.5
 
-    controls = st.columns([2.0, 1.7, 1.4, 1.2])
+    controls = st.columns([2.0, 1.7, 1.4])
     default_year = int(
         np.clip(
             st.session_state.get(CLIMATE_TWIN_YEAR_KEY, min(100, int(years[-1]))),
@@ -595,7 +668,6 @@ def render_map_page():
         help="Tile is counted as livable when habitability score is >= threshold.",
     )
     show_livable_only = controls[2].toggle("Show Livable Only", value=False)
-    auto_center = controls[3].toggle("Auto Center", value=True)
 
     idx = int(np.argmin(np.abs(years - year)))
     climate_twin_habitable_pct = _climate_twin_habitability_percent(
@@ -622,13 +694,15 @@ def render_map_page():
     else:
         plot_score = score
 
-    fig = _habitability_map(lat_deg, lon_deg, plot_score, land_mask, livable_mask, int(years[idx]))
-    if not auto_center:
-        center_col1, center_col2 = st.columns(2)
-        center_lat = center_col1.slider("Center Latitude", min_value=-90, max_value=90, value=PLANET_VIEW_LAT)
-        center_lon = center_col2.slider("Center Longitude", min_value=-180, max_value=180, value=PLANET_VIEW_LON)
-        fig.update_geos(projection_rotation=dict(lat=center_lat, lon=center_lon))
-    st.plotly_chart(fig, use_container_width=True)
+    fig = _habitability_map(
+        lat_deg,
+        lon_deg,
+        plot_score,
+        land_mask,
+        livable_mask,
+        int(years[idx]),
+    )
+    _render_spinning_geo(fig, component_key="refugia_map_globe", height_px=590)
 
     with st.container(border=True):
         st.subheader("Map Statistics")

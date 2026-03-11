@@ -3,7 +3,9 @@ from math import log
 
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Scenario Builder", layout="wide")
 
@@ -31,6 +33,9 @@ WEATHERING_TEMP_SENS = 0.045
 BIOSPHERE_COEFF = 0.94 * DEFAULT_BIOSPHERE_UPTAKE_STRENGTH
 EMISSIONS_TO_PPM_PER_YEAR = 0.8
 LATITUDE_BASE_CONTRAST_C = 24.0
+PLANET_RIGHT_TILT_DEG = 23.5
+PLANET_INITIAL_VIEW_LON_DEG = 38.0
+PLANET_SPIN_SPEED_DEG_PER_SEC = 6.0
 
 INTERNAL_MODEL_CONSTANTS = {
     "co2_baseline_ppm": CO2_BASELINE_PPM,
@@ -300,16 +305,26 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
             )
         ]
     )
+    view_phase_rad = np.deg2rad(float(PLANET_INITIAL_VIEW_LON_DEG))
+    eye_radius = 2.05 + 0.25 * radius_scale
+    eye_x = eye_radius * float(np.cos(view_phase_rad))
+    eye_y = eye_radius * float(np.sin(view_phase_rad))
+    eye_z = 0.98 + 0.14 * radius_scale
+    tilt_rad = np.deg2rad(PLANET_RIGHT_TILT_DEG)
     fig.update_layout(
         margin=dict(l=0, r=0, t=0, b=0),
         height=300,
+        clickmode="event+select",
         scene=dict(
             xaxis=dict(visible=False),
             yaxis=dict(visible=False),
             zaxis=dict(visible=False),
             aspectmode="data",
             bgcolor="rgb(10, 14, 24)",
-            camera=dict(eye=dict(x=1.6 + 0.25 * radius_scale, y=1.3 + 0.2 * radius_scale, z=1.0)),
+            camera=dict(
+                eye=dict(x=eye_x, y=eye_y, z=eye_z),
+                up=dict(x=float(np.sin(tilt_rad)), y=0.0, z=float(np.cos(tilt_rad))),
+            ),
         ),
     )
     return fig
@@ -396,6 +411,83 @@ def _section_header(title: str, first: bool = False):
         f"<h3 style='font-size:1.45rem;line-height:1.2;margin:0 0 0.6rem 0;'>{title}</h3>",
         unsafe_allow_html=True,
     )
+
+
+def _render_spinning_surface(fig: go.Figure, component_key: str, height_px: int):
+    div_id = f"{component_key}_plot"
+    # Client-side spin keeps Streamlit widgets responsive.
+    post_script = f"""
+const plot = document.getElementById('{div_id}');
+if (plot) {{
+  let spinning = true;
+  const speedDegPerSec = {PLANET_SPIN_SPEED_DEG_PER_SEC:.3f};
+  const toRad = Math.PI / 180.0;
+  const initialEye = plot.layout?.scene?.camera?.eye ?? {{x: 1.8, y: 1.4, z: 1.0}};
+  const initialUp = plot.layout?.scene?.camera?.up ?? {{x: 0.0, y: 0.0, z: 1.0}};
+  const radius = Math.max(0.5, Math.hypot(initialEye.x ?? 1.8, initialEye.y ?? 1.4));
+  const z = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
+  let angleDeg = (Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad + 360.0) % 360.0;
+  let lastTs = performance.now();
+  let internalUpdate = false;
+  let pending = false;
+  const stop = () => {{ spinning = false; }};
+  plot.addEventListener('pointerdown', stop, {{ passive: true }});
+  plot.addEventListener('wheel', stop, {{ passive: true }});
+  plot.addEventListener('touchstart', stop, {{ passive: true }});
+  plot.on('plotly_click', stop);
+  plot.on('plotly_doubleclick', stop);
+  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) stop(); }});
+  plot.on('plotly_relayout', (ev) => {{
+    if (internalUpdate) return;
+    if (!ev) return;
+    if (Object.prototype.hasOwnProperty.call(ev, 'scene.camera') ||
+        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye') ||
+        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.up')) {{
+      stop();
+    }}
+  }});
+  const applyCamera = () => {{
+    if (pending) return;
+    pending = true;
+    internalUpdate = true;
+    const finalize = () => {{
+      pending = false;
+      internalUpdate = false;
+    }};
+    const angleRad = angleDeg * toRad;
+    const result = Plotly.relayout(plot, {{
+      'scene.camera.eye': {{x: radius * Math.cos(angleRad), y: radius * Math.sin(angleRad), z: z}},
+      'scene.camera.up': initialUp
+    }});
+    if (result && typeof result.then === 'function') {{
+      result.then(finalize).catch(finalize);
+    }} else {{
+      finalize();
+    }}
+  }};
+  const tick = (ts) => {{
+    const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
+    lastTs = ts;
+    if (spinning) {{
+      angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
+      applyCamera();
+    }}
+    requestAnimationFrame(tick);
+  }};
+  requestAnimationFrame(tick);
+}}
+"""
+    html = pio.to_html(
+        fig,
+        include_plotlyjs="inline",
+        full_html=False,
+        default_width="100%",
+        default_height=f"{int(height_px)}px",
+        div_id=div_id,
+        post_script=post_script,
+        config={"displayModeBar": True, "responsive": True},
+    )
+    components.html(html, height=int(height_px) + 12, scrolling=False)
 
 
 def _initialize_state():
@@ -926,7 +1018,7 @@ def render_scenario_builder_page():
                 radius_km=DEFAULT_PLANET_RADIUS_KM,
                 seed=int(st.session_state.get("texture_seed", 0)),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            _render_spinning_surface(fig, component_key="scenario_builder_planet", height_px=300)
 
         with st.container(border=True):
             st.subheader("Scenario Summary")
