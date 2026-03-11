@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 import streamlit.components.v1 as components
+import urllib.parse
+import urllib.request
 
 st.set_page_config(page_title="Scenario Builder", layout="wide")
 
@@ -36,6 +38,8 @@ LATITUDE_BASE_CONTRAST_C = 24.0
 PLANET_RIGHT_TILT_DEG = 23.5
 PLANET_INITIAL_VIEW_LON_DEG = 38.0
 PLANET_SPIN_SPEED_DEG_PER_SEC = 10.2
+STELLAR_FLUX_INPUT_MIN = 0.05
+STELLAR_FLUX_INPUT_MAX = 20.0
 
 INTERNAL_MODEL_CONSTANTS = {
     "co2_baseline_ppm": CO2_BASELINE_PPM,
@@ -194,6 +198,174 @@ HABITABILITY_PROFILES = {
     "Conservative Biosphere": (5.0, 32.0),
     "Broad Microbial Tolerance": (-10.0, 55.0),
 }
+
+EXOPLANET_ARCHIVE_TAP_URL = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+EXOPLANET_ARCHIVE_QUERY = (
+    "select pl_name,hostname,pl_insol,pl_eqt,pl_orbeccen "
+    "from ps where default_flag=1 and pl_name is not null and pl_insol is not null"
+)
+EXOPLANET_PRESET_PREFIX = "Exoplanet: "
+EXOPLANET_SAMPLE_SIZE = 100
+
+
+def _safe_float(value, default=np.nan):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _is_exoplanet_preset_name(name: str):
+    return isinstance(name, str) and name.startswith(EXOPLANET_PRESET_PREFIX)
+
+
+def _is_known_preset_name(name: str):
+    return isinstance(name, str) and (name in PRESETS or _is_exoplanet_preset_name(name))
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_exoplanet_rows():
+    params = urllib.parse.urlencode({"query": EXOPLANET_ARCHIVE_QUERY, "format": "json"})
+    url = f"{EXOPLANET_ARCHIVE_TAP_URL}?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    rows = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("pl_name", "")).strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "pl_name": name,
+                "hostname": str(row.get("hostname", "")).strip(),
+                "pl_insol": _safe_float(row.get("pl_insol")),
+                "pl_eqt": _safe_float(row.get("pl_eqt")),
+                "pl_orbeccen": _safe_float(row.get("pl_orbeccen")),
+            }
+        )
+    return rows
+
+
+def _refresh_exoplanet_sample():
+    rows = _fetch_exoplanet_rows()
+    if not rows:
+        st.session_state["exoplanet_random_sample"] = []
+        return
+    take = min(EXOPLANET_SAMPLE_SIZE, len(rows))
+    rng = np.random.default_rng()
+    idx = rng.choice(len(rows), size=take, replace=False)
+    sample = [rows[int(i)] for i in idx]
+    sample.sort(key=lambda item: str(item.get("pl_name", "")).lower())
+    st.session_state["exoplanet_random_sample"] = sample
+
+
+def _format_exoplanet_option(row: dict):
+    name = str(row.get("pl_name", "Unknown")).strip() or "Unknown"
+    host = str(row.get("hostname", "")).strip()
+    insol = _safe_float(row.get("pl_insol"))
+    eqt_k = _safe_float(row.get("pl_eqt"))
+    ecc = _safe_float(row.get("pl_orbeccen"))
+    host_suffix = f" @ {host}" if host else ""
+    insol_text = f"{insol:.2f} S_earth" if np.isfinite(insol) else "S_earth n/a"
+    eqt_text = f"{eqt_k:.0f} K" if np.isfinite(eqt_k) else "Teq n/a"
+    ecc_text = f"e={ecc:.2f}" if np.isfinite(ecc) else "e=n/a"
+    return f"{EXOPLANET_PRESET_PREFIX}{name}{host_suffix} [{insol_text}, {eqt_text}, {ecc_text}]"
+
+
+def _build_exoplanet_option_map():
+    sample = st.session_state.get("exoplanet_random_sample", [])
+    if not isinstance(sample, list):
+        return {}
+    mapping = {}
+    for idx, row in enumerate(sample):
+        if not isinstance(row, dict):
+            continue
+        label = _format_exoplanet_option(row)
+        if label in mapping:
+            label = f"{label} #{idx + 1}"
+        mapping[label] = row
+    return mapping
+
+
+def _exoplanet_row_to_preset(row: dict):
+    preset = dict(PRESETS["Earth-like Baseline"])
+    insol = _safe_float(row.get("pl_insol"))
+    flux_multiplier = 1.0
+    if np.isfinite(insol):
+        flux_multiplier = float(np.clip(insol, STELLAR_FLUX_INPUT_MIN, STELLAR_FLUX_INPUT_MAX))
+    eqt_k = _safe_float(row.get("pl_eqt"))
+    eqt_c = eqt_k - 273.15 if np.isfinite(eqt_k) else np.nan
+    eccentricity = _safe_float(row.get("pl_orbeccen"))
+
+    preset["stellar_flux_multiplier"] = flux_multiplier
+    if np.isfinite(eccentricity):
+        preset["enable_seasonality"] = bool(eccentricity >= 0.08)
+
+    if np.isfinite(eqt_c):
+        if eqt_c <= -20:
+            preset["warm_albedo"] = 0.35
+            preset["ice_albedo"] = 0.78
+            preset["habitability_profile"] = "Conservative Biosphere"
+        elif eqt_c >= 35:
+            preset["warm_albedo"] = 0.24
+            preset["ice_albedo"] = 0.54
+            preset["habitability_profile"] = "Broad Microbial Tolerance"
+        else:
+            preset["warm_albedo"] = 0.30
+            preset["ice_albedo"] = 0.62
+            preset["habitability_profile"] = "Liquid Water"
+    elif flux_multiplier <= 0.92:
+        preset["warm_albedo"] = 0.33
+        preset["ice_albedo"] = 0.74
+        preset["habitability_profile"] = "Conservative Biosphere"
+    elif flux_multiplier >= 1.08:
+        preset["warm_albedo"] = 0.26
+        preset["ice_albedo"] = 0.56
+        preset["habitability_profile"] = "Broad Microbial Tolerance"
+    else:
+        preset["warm_albedo"] = 0.30
+        preset["ice_albedo"] = 0.62
+        preset["habitability_profile"] = "Liquid Water"
+
+    if np.isfinite(eqt_c):
+        if eqt_c < -40:
+            preset["initial_co2_ppm"] = 240.0
+        elif eqt_c < -10:
+            preset["initial_co2_ppm"] = 320.0
+        elif eqt_c < 20:
+            preset["initial_co2_ppm"] = 420.0
+        elif eqt_c < 50:
+            preset["initial_co2_ppm"] = 620.0
+        else:
+            preset["initial_co2_ppm"] = 850.0
+    elif flux_multiplier <= 0.95:
+        preset["initial_co2_ppm"] = 320.0
+    elif flux_multiplier >= 1.05:
+        preset["initial_co2_ppm"] = 620.0
+    else:
+        preset["initial_co2_ppm"] = 420.0
+
+    tmin, tmax = HABITABILITY_PROFILES[preset["habitability_profile"]]
+    preset["habitable_temp_min_c"] = float(tmin)
+    preset["habitable_temp_max_c"] = float(tmax)
+    return preset
+
+
+def _apply_exoplanet_preset(name: str, row: dict):
+    preset = _exoplanet_row_to_preset(row)
+    for key in SCENARIO_INPUT_KEYS:
+        st.session_state[key] = preset[key]
+    st.session_state["builder_persisted_preset_name"] = name
+    st.session_state["builder_persisted_inputs"] = {key: preset[key] for key in SCENARIO_INPUT_KEYS}
+    st.session_state["selected_exoplanet_row"] = dict(row)
 
 
 def _planet_surface(lon, lat, seed: int, temp_c: float):
@@ -507,17 +679,20 @@ def _initialize_state():
         st.session_state["preset_name"] = desired_preset_name
     else:
         current_widget_preset = st.session_state.get("preset_name")
-        if isinstance(current_widget_preset, str) and current_widget_preset in PRESETS:
+        if _is_known_preset_name(current_widget_preset):
             desired_preset_name = current_widget_preset
         else:
             desired_preset_name = str(st.session_state.get("builder_persisted_preset_name", "Earth-like Baseline"))
-            if desired_preset_name not in PRESETS:
+            if not _is_known_preset_name(desired_preset_name):
                 desired_preset_name = "Earth-like Baseline"
             st.session_state["preset_name"] = desired_preset_name
     st.session_state["builder_persisted_preset_name"] = desired_preset_name
     st.session_state.setdefault("show_debug", False)
     st.session_state.setdefault("texture_seed", int(np.random.randint(0, 1_000_000_000)))
     st.session_state.setdefault("submitted_scenario_snapshot", None)
+    st.session_state.setdefault("show_exoplanet_presets", False)
+    st.session_state.setdefault("exoplanet_random_sample", [])
+    st.session_state.setdefault("selected_exoplanet_row", None)
     for key in REMOVED_UI_KEYS:
         st.session_state.pop(key, None)
 
@@ -530,6 +705,7 @@ def _apply_preset(name: str):
         st.session_state[key] = value
     st.session_state["builder_persisted_preset_name"] = name
     st.session_state["builder_persisted_inputs"] = {key: preset[key] for key in SCENARIO_INPUT_KEYS}
+    st.session_state["selected_exoplanet_row"] = None
 
 
 def _collect_inputs():
@@ -547,6 +723,16 @@ def _collect_inputs():
         "habitable_temp_min_c": float(st.session_state.habitable_temp_min_c),
         "habitable_temp_max_c": float(st.session_state.habitable_temp_max_c),
     }
+
+
+def _selected_exoplanet_temperature_c():
+    selected_exoplanet = st.session_state.get("selected_exoplanet_row")
+    if not isinstance(selected_exoplanet, dict):
+        return None
+    eqt_k = _safe_float(selected_exoplanet.get("pl_eqt"))
+    if not np.isfinite(eqt_k):
+        return None
+    return float(eqt_k - 273.15)
 
 
 def _effective_ice_weight(temp_c: float):
@@ -615,17 +801,20 @@ def _biosphere_sink(temp_c: float, co2_ppm: float):
     return float(BIOSPHERE_COEFF * (co2_ppm / CO2_BASELINE_PPM) * temp_factor)
 
 
-def _integrate_projected_co2(p):
+def _integrate_projected_co2(p, temp_c_override=None):
     co2_ppm = max(float(p["initial_co2_ppm"]), 1.0)
     total_human = 0.0
 
     for year in range(PREVIEW_HORIZON_YEARS):
-        temp_c, _ = _temperature_from_co2(
-            stellar_flux_multiplier=p["stellar_flux_multiplier"],
-            warm_albedo=p["warm_albedo"],
-            ice_albedo=p["ice_albedo"],
-            co2_ppm=co2_ppm,
-        )
+        if temp_c_override is None:
+            temp_c, _ = _temperature_from_co2(
+                stellar_flux_multiplier=p["stellar_flux_multiplier"],
+                warm_albedo=p["warm_albedo"],
+                ice_albedo=p["ice_albedo"],
+                co2_ppm=co2_ppm,
+            )
+        else:
+            temp_c = float(temp_c_override)
         e_human = _human_emissions_rate(
             mode=p["emissions_growth_mode"],
             emissions_rate=p["emissions_rate"],
@@ -679,15 +868,19 @@ def _habitability_percent(temp_global_c: float, projected_co2_ppm: float, p):
     return float(np.clip(habitable_frac, 0.0, 100.0))
 
 
-def _estimate_state(p):
-    projected_co2_ppm, avg_human_emissions = _integrate_projected_co2(p)
+def _estimate_state(p, temp_c_override=None):
+    projected_co2_ppm, avg_human_emissions = _integrate_projected_co2(p, temp_c_override=temp_c_override)
 
-    temp_c, effective_albedo = _temperature_from_co2(
-        stellar_flux_multiplier=p["stellar_flux_multiplier"],
-        warm_albedo=p["warm_albedo"],
-        ice_albedo=p["ice_albedo"],
-        co2_ppm=projected_co2_ppm,
-    )
+    if temp_c_override is None:
+        temp_c, effective_albedo = _temperature_from_co2(
+            stellar_flux_multiplier=p["stellar_flux_multiplier"],
+            warm_albedo=p["warm_albedo"],
+            ice_albedo=p["ice_albedo"],
+            co2_ppm=projected_co2_ppm,
+        )
+    else:
+        temp_c = float(temp_c_override)
+        effective_albedo = _effective_albedo(temp_c, p["warm_albedo"], p["ice_albedo"])
     temperature_k = temp_c + 273.15
     habitable_surface_pct = _habitability_percent(temp_c, projected_co2_ppm, p)
     ice_weight = _effective_ice_weight(temp_c)
@@ -903,25 +1096,83 @@ def render_scenario_builder_page():
     st.caption("Define a planetary climate-biosphere-civilization scenario and launch the digital twin.")
 
     st.markdown("**Preset Library**")
+    selected_preset_name = str(st.session_state.get("preset_name", "Earth-like Baseline"))
+    show_exoplanet_presets = bool(st.session_state.get("show_exoplanet_presets", False))
+    if _is_exoplanet_preset_name(selected_preset_name):
+        show_exoplanet_presets = True
+        st.session_state["show_exoplanet_presets"] = True
+
+    if show_exoplanet_presets and not st.session_state.get("exoplanet_random_sample"):
+        _refresh_exoplanet_sample()
+
+    exoplanet_option_map = _build_exoplanet_option_map() if show_exoplanet_presets else {}
+    preset_options = list(PRESETS.keys()) + list(exoplanet_option_map.keys())
+    if selected_preset_name not in preset_options:
+        st.session_state["preset_name"] = "Earth-like Baseline"
+
     preset_cols = st.columns([1.8, 1.0, 1.0])
     preset_name = preset_cols[0].selectbox(
         "Preset Library",
-        list(PRESETS.keys()),
+        preset_options,
         key="preset_name",
         label_visibility="collapsed",
     )
     if preset_cols[1].button("Load Preset", type="secondary", use_container_width=True):
-        _apply_preset(preset_name)
-        st.rerun()
+        if preset_name in PRESETS:
+            _apply_preset(preset_name)
+            st.rerun()
+        elif preset_name in exoplanet_option_map:
+            _apply_exoplanet_preset(preset_name, exoplanet_option_map[preset_name])
+            st.rerun()
+        else:
+            st.warning("Selected preset is unavailable. Use Show More and try Random 100 again.")
     if preset_cols[2].button("Reset to Default", type="secondary", use_container_width=True):
         st.session_state["force_preset_name_once"] = "Earth-like Baseline"
         _apply_preset("Earth-like Baseline")
         st.rerun()
 
+    extra_cols = st.columns([1.0, 1.0, 2.8])
+    if not show_exoplanet_presets:
+        if extra_cols[0].button("Show More", type="secondary", use_container_width=True):
+            st.session_state["show_exoplanet_presets"] = True
+            _refresh_exoplanet_sample()
+            st.rerun()
+    else:
+        if extra_cols[0].button("Hide Extras", type="secondary", use_container_width=True):
+            st.session_state["show_exoplanet_presets"] = False
+            if _is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))):
+                _apply_preset("Earth-like Baseline")
+            st.rerun()
+        if extra_cols[1].button("Random 100", type="secondary", use_container_width=True):
+            _refresh_exoplanet_sample()
+            st.rerun()
+        extra_cols[2].caption(
+            f"Showing {len(exoplanet_option_map)} random planets from NASA Exoplanet Archive (PS table)."
+        )
+
+    selected_exoplanet = st.session_state.get("selected_exoplanet_row")
+    if _is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))) and isinstance(selected_exoplanet, dict):
+        pl_name = str(selected_exoplanet.get("pl_name", "Unknown")).strip() or "Unknown"
+        host = str(selected_exoplanet.get("hostname", "")).strip()
+        host_text = f" @ {host}" if host else ""
+        insol = _safe_float(selected_exoplanet.get("pl_insol"))
+        eqt_k = _safe_float(selected_exoplanet.get("pl_eqt"))
+        eqt_c = eqt_k - 273.15 if np.isfinite(eqt_k) else np.nan
+        ecc = _safe_float(selected_exoplanet.get("pl_orbeccen"))
+        insol_text = f"{insol:.2f} S_earth" if np.isfinite(insol) else "S_earth n/a"
+        eqt_text = f"{eqt_k:.0f} K ({eqt_c:.1f} C)" if np.isfinite(eqt_k) else "Teq n/a"
+        ecc_text = f"{ecc:.3f}" if np.isfinite(ecc) else "n/a"
+        st.caption(
+            "Loaded from NASA Exoplanet Archive: "
+            f"{pl_name}{host_text} | Insolation: {insol_text} | Equilibrium Temp: {eqt_text} | "
+            f"Eccentricity: {ecc_text} | Using DB temperature directly"
+        )
+
     current_inputs = _collect_inputs()
     st.session_state["builder_persisted_inputs"] = dict(current_inputs)
     st.session_state["builder_persisted_preset_name"] = str(st.session_state.get("preset_name", "Earth-like Baseline"))
-    derived = _estimate_state(current_inputs)
+    exoplanet_temp_c_override = _selected_exoplanet_temperature_c()
+    derived = _estimate_state(current_inputs, temp_c_override=exoplanet_temp_c_override)
 
     st.subheader("Current Predicted State")
     st.caption("Estimated from the current parameter configuration before full simulation.")
@@ -961,8 +1212,8 @@ def render_scenario_builder_page():
         _section_header("Star & Orbit", first=True)
         st.number_input(
             "Stellar Flux Multiplier",
-            min_value=0.70,
-            max_value=1.30,
+            min_value=STELLAR_FLUX_INPUT_MIN,
+            max_value=STELLAR_FLUX_INPUT_MAX,
             step=0.01,
             key="stellar_flux_multiplier",
             help="Scales incoming stellar radiation from the host star.",
