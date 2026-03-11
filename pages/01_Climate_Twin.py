@@ -672,7 +672,7 @@ def render_climate_twin_page():
             int(years[idx]),
             events,
         )
-        st.plotly_chart(temp_fig, use_container_width=True)
+        st.plotly_chart(temp_fig, use_container_width=True, key="climate_twin_temp_chart")
 
         co2_fig = _build_chart(
             years,
@@ -683,7 +683,7 @@ def render_climate_twin_page():
             int(years[idx]),
             events,
         )
-        st.plotly_chart(co2_fig, use_container_width=True)
+        st.plotly_chart(co2_fig, use_container_width=True, key="climate_twin_co2_chart")
 
         hab_fig = _build_chart(
             years,
@@ -694,7 +694,7 @@ def render_climate_twin_page():
             int(years[idx]),
             events,
         )
-        st.plotly_chart(hab_fig, use_container_width=True)
+        st.plotly_chart(hab_fig, use_container_width=True, key="climate_twin_hab_chart")
 
     with right_col:
         with st.container(border=True):
@@ -760,7 +760,17 @@ def render_climate_twin_page():
     if controls[1].button("Pause", use_container_width=True):
         st.session_state[PLAY_KEY] = False
 
-    controls[2].slider("Year", min_value=0, max_value=SIM_YEARS, key=YEAR_KEY)
+    selected_year = controls[2].slider(
+        "Year",
+        min_value=0,
+        max_value=SIM_YEARS,
+        value=int(st.session_state[YEAR_KEY]),
+        step=1,
+    )
+    if int(selected_year) != int(st.session_state[YEAR_KEY]):
+        st.session_state[YEAR_KEY] = int(selected_year)
+        st.session_state[PLAY_KEY] = False
+        st.rerun()
 
     mitigation_year = int(params["mitigation_start_year"])
     if controls[3].button("Mitigation", use_container_width=True):
@@ -780,7 +790,8 @@ def render_climate_twin_page():
         if st.session_state[YEAR_KEY] >= SIM_YEARS:
             st.session_state[PLAY_KEY] = False
         else:
-            time.sleep(0.08)
+            # Lower update frequency reduces visible full-page flicker during Streamlit reruns.
+            time.sleep(0.14)
             st.session_state[YEAR_KEY] = int(st.session_state[YEAR_KEY] + 1)
             st.rerun()
 
