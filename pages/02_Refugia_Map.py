@@ -18,6 +18,8 @@ ALBEDO_REF = 0.30
 DEFAULT_SEASONALITY_AMPLITUDE = 0.12
 DEFAULT_ICE_TRANSITION_TEMP_C = -10.0
 ICE_TRANSITION_WIDTH_C = 5.0
+HABITABILITY_SOFT_MARGIN_C = 1.6
+HABITABILITY_LAT_BANDS = 181
 NATURAL_OUTGASSING = 0.9
 DEFAULT_WEATHERING_STRENGTH = 0.55
 DEFAULT_BIOSPHERE_UPTAKE_STRENGTH = 0.50
@@ -31,7 +33,6 @@ WEATHERING_COEFF = 0.94 * DEFAULT_WEATHERING_STRENGTH * 0.50
 WEATHERING_TEMP_SENS = 0.045
 BIOSPHERE_COEFF = 0.94 * DEFAULT_BIOSPHERE_UPTAKE_STRENGTH * 0.50
 EMISSIONS_TO_PPM_PER_YEAR = 1.0
-CO2_HUMAN_MAX_SAFE_PPM = 1000.0
 CLIMATE_TWIN_SERIES_CACHE_KEY = "climate_twin_series_cache"
 CLIMATE_TWIN_YEAR_KEY = "climate_twin_year"
 
@@ -370,8 +371,7 @@ def _generate_geography(texture_seed: int, texture_temp_c: float):
     }
 
 
-def _local_temperature_c(global_temp_c: float, lat_deg: np.ndarray, elevation_km: np.ndarray, microclimate_c: np.ndarray, params):
-    lat_rad = np.deg2rad(lat_deg)[:, None]
+def _thermal_shape(global_temp_c: float, params):
     hot_anomaly = max(0.0, global_temp_c - 22.0)
     cold_anomaly = max(0.0, 8.0 - global_temp_c)
     albedo_contrast = max(0.0, params["ice_albedo"] - params["warm_albedo"])
@@ -381,6 +381,52 @@ def _local_temperature_c(global_temp_c: float, lat_deg: np.ndarray, elevation_km
     polar_cooling_strength = float(
         np.clip(20.0 + 0.55 * cold_anomaly + 0.65 * hot_anomaly + 6.0 * max(0.0, albedo_contrast - 0.20) + 12.0 * seasonality, 12.0, 42.0)
     )
+    thermal_spread = equatorial_heat_excess + polar_cooling_strength
+    return equatorial_heat_excess, polar_cooling_strength, thermal_spread
+
+
+def _climate_twin_stress(global_temp_c: float, global_co2_ppm: float, thermal_spread: float):
+    overheat = np.clip((global_temp_c - 30.0) / 14.0, 0.0, 1.0)
+    cold_stress = np.clip((2.0 - global_temp_c) / 16.0, 0.0, 1.0)
+    greenhouse_stress = np.clip((global_co2_ppm - 650.0) / 1000.0, 0.0, 1.0)
+    spread_stress = np.clip((thermal_spread - 48.0) / 26.0, 0.0, 1.0)
+    comfort_stress = np.clip((abs(global_temp_c - REFERENCE_TEMP_C) - 2.0) / 30.0, 0.0, 1.0)
+    return float(
+        np.clip(
+            0.23 * overheat + 0.14 * cold_stress + 0.18 * greenhouse_stress + 0.10 * spread_stress + 0.18 * comfort_stress,
+            0.0,
+            0.50,
+        )
+    )
+
+
+def _climate_twin_habitability_percent(global_temp_c: float, global_co2_ppm: float, params):
+    lat_deg = np.linspace(-89.5, 89.5, HABITABILITY_LAT_BANDS)
+    lat_rad = np.deg2rad(lat_deg)
+    equatorial_heat_excess, polar_cooling_strength, thermal_spread = _thermal_shape(global_temp_c, params)
+    lat_temp = (
+        global_temp_c
+        + equatorial_heat_excess * (np.cos(lat_rad) ** 2)
+        - polar_cooling_strength * (np.sin(lat_rad) ** 2)
+    )
+    soft_margin_c = (
+        HABITABILITY_SOFT_MARGIN_C
+        + 0.05 * np.clip(thermal_spread - 30.0, 0.0, 24.0)
+        + (0.45 if params["enable_seasonality"] else 0.0)
+    )
+    lower_ok = _soft_step((lat_temp - params["habitable_temp_min_c"]) / soft_margin_c)
+    upper_ok = _soft_step((params["habitable_temp_max_c"] - lat_temp) / soft_margin_c)
+    local_habitability = lower_ok * upper_ok
+    weights = np.cos(lat_rad)
+    habitable_frac = 100.0 * float(np.sum(weights * local_habitability) / np.sum(weights))
+    stress = _climate_twin_stress(global_temp_c, global_co2_ppm, thermal_spread)
+    habitable_frac *= 1.0 - stress
+    return float(np.clip(habitable_frac, 0.0, 100.0))
+
+
+def _local_temperature_c(global_temp_c: float, lat_deg: np.ndarray, elevation_km: np.ndarray, microclimate_c: np.ndarray, params):
+    lat_rad = np.deg2rad(lat_deg)[:, None]
+    equatorial_heat_excess, polar_cooling_strength, _ = _thermal_shape(global_temp_c, params)
     lat_band_temp_c = global_temp_c + equatorial_heat_excess * (np.cos(lat_rad) ** 2) - polar_cooling_strength * (np.sin(lat_rad) ** 2)
     return lat_band_temp_c + microclimate_c - 6.5 * elevation_km
 
@@ -391,46 +437,39 @@ def _tile_co2_ppm(global_co2_ppm: float, elevation_km: np.ndarray):
     return np.clip(global_co2_ppm * pressure_factor * basin_boost, 1.0, None)
 
 
-def _temperature_suitability(local_temp_c: np.ndarray, tmin_c: float, tmax_c: float):
-    center_c = 0.5 * (tmin_c + tmax_c)
-    half_width_c = max(1.0, 0.5 * (tmax_c - tmin_c))
-    distance = np.abs(local_temp_c - center_c) / half_width_c
-    inside_score = 1.0 - 0.30 * np.power(np.clip(distance, 0.0, 1.0), 1.5)
-    outside_score = 0.30 * np.exp(-np.clip(distance - 1.0, 0.0, None) / 0.45)
-    return np.clip(np.where(distance <= 1.0, inside_score, outside_score), 0.0, 1.0)
+def _temperature_suitability(local_temp_c: np.ndarray, tmin_c: float, tmax_c: float, thermal_spread: float, enable_seasonality: bool):
+    soft_margin_c = (
+        HABITABILITY_SOFT_MARGIN_C
+        + 0.05 * np.clip(thermal_spread - 30.0, 0.0, 24.0)
+        + (0.45 if enable_seasonality else 0.0)
+    )
+    lower_ok = _soft_step((local_temp_c - tmin_c) / soft_margin_c)
+    upper_ok = _soft_step((tmax_c - local_temp_c) / soft_margin_c)
+    return np.clip(lower_ok * upper_ok, 0.0, 1.0)
 
 
-def _co2_suitability(tile_co2_ppm: np.ndarray):
-    score = np.ones_like(tile_co2_ppm, dtype=float)
-
-    mid = (tile_co2_ppm > 450.0) & (tile_co2_ppm <= 1000.0)
-    score[mid] = 1.0 - 0.45 * np.clip((tile_co2_ppm[mid] - 450.0) / 550.0, 0.0, 1.0)
-
-    high = (tile_co2_ppm > 1000.0) & (tile_co2_ppm <= 2000.0)
-    score[high] = 0.55 - 0.45 * np.clip((tile_co2_ppm[high] - 1000.0) / 1000.0, 0.0, 1.0)
-
-    extreme = tile_co2_ppm > 2000.0
-    score[extreme] = 0.10 * np.exp(-(tile_co2_ppm[extreme] - 2000.0) / 500.0)
-
-    return np.clip(score, 0.0, 1.0)
+def _co2_suitability(global_temp_c: float, global_co2_ppm: float, thermal_spread: float, shape):
+    stress = _climate_twin_stress(global_temp_c, global_co2_ppm, thermal_spread)
+    return np.full(shape, 1.0 - stress, dtype=float)
 
 
 def _temperature_hard_constraint(local_temp_c: np.ndarray, tmin_c: float, tmax_c: float):
     return (local_temp_c >= tmin_c) & (local_temp_c <= tmax_c)
 
 
-def _co2_hard_constraint(tile_co2_ppm: np.ndarray):
-    return tile_co2_ppm <= CO2_HUMAN_MAX_SAFE_PPM
-
-
-def _human_habitability(local_temp_c: np.ndarray, tile_co2_ppm: np.ndarray, params):
+def _human_habitability(local_temp_c: np.ndarray, global_temp_c: float, global_co2_ppm: float, params):
+    _, _, thermal_spread = _thermal_shape(global_temp_c, params)
     temp_ok = _temperature_hard_constraint(local_temp_c, params["habitable_temp_min_c"], params["habitable_temp_max_c"])
-    co2_ok = _co2_hard_constraint(tile_co2_ppm)
-    temp_score = _temperature_suitability(local_temp_c, params["habitable_temp_min_c"], params["habitable_temp_max_c"])
-    co2_score = _co2_suitability(tile_co2_ppm)
+    temp_score = _temperature_suitability(
+        local_temp_c,
+        params["habitable_temp_min_c"],
+        params["habitable_temp_max_c"],
+        thermal_spread,
+        bool(params["enable_seasonality"]),
+    )
+    co2_score = _co2_suitability(global_temp_c, global_co2_ppm, thermal_spread, local_temp_c.shape)
     score = np.clip(temp_score * co2_score, 0.0, 1.0)
-    score = np.where(temp_ok & co2_ok, score, 0.0)
-    return score, temp_score, co2_score, temp_ok, co2_ok
+    return score, temp_score, co2_score, temp_ok
 
 
 def _habitability_map(
@@ -438,12 +477,12 @@ def _habitability_map(
     lon_deg: np.ndarray,
     score: np.ndarray,
     land_mask: np.ndarray,
-    livable_threshold: float,
+    livable_mask: np.ndarray,
     year: int,
 ):
     lon2, lat2 = np.meshgrid(lon_deg, lat_deg)
     plot_score = np.where(land_mask, score, np.nan)
-    is_livable = (np.nan_to_num(plot_score.ravel(), nan=-1.0) >= livable_threshold).astype(int)
+    is_livable = np.where(livable_mask.ravel(), 1, 0)
     surface_label = np.where(land_mask.ravel() > 0.5, "Land", "Water")
     custom = np.column_stack((np.nan_to_num(plot_score.ravel(), nan=0.0), is_livable, surface_label))
     fig = go.Figure(
@@ -503,7 +542,7 @@ def _habitability_map(
 def render_map_page():
     st.markdown("<style>[data-testid='stHeaderActionElements']{display:none;}</style>", unsafe_allow_html=True)
     st.title("Refugia Map")
-    st.caption("Shows where humankind can live based on tile temperature and tile CO2, with static red-to-green scale.")
+    st.caption("Shows where humankind can live based on tile temperature and CO2 stress, with static red-to-green scale.")
 
     params = _load_current_scenario()
     payload = json.dumps(params, sort_keys=True)
@@ -513,12 +552,10 @@ def render_map_page():
         years = np.array(sim["years"], dtype=int)
         global_temp_c = np.array(sim["temp_c"], dtype=float)
         global_co2_ppm = np.array(sim["co2_ppm"], dtype=float)
-        official_habitable_pct_series = None
     else:
         years = np.asarray(climate_cache["years"], dtype=int)
         global_temp_c = np.asarray(climate_cache["global_temperature_c"], dtype=float)
         global_co2_ppm = np.asarray(climate_cache["co2_ppm"], dtype=float)
-        official_habitable_pct_series = np.asarray(climate_cache["habitable_surface_percent"], dtype=float)
 
     texture_seed = _texture_seed_for_map(payload)
     # Use the same texture seed as screen 1; water/land boundaries then match that planet.
@@ -561,24 +598,31 @@ def render_map_page():
     auto_center = controls[3].toggle("Auto Center", value=True)
 
     idx = int(np.argmin(np.abs(years - year)))
-    official_habitable_pct = None
-    official_habitability_score = None
-    if official_habitable_pct_series is not None and idx < len(official_habitable_pct_series):
-        official_habitable_pct = float(np.clip(official_habitable_pct_series[idx], 0.0, 100.0))
-        official_habitability_score = official_habitable_pct / 100.0
+    climate_twin_habitable_pct = _climate_twin_habitability_percent(
+        float(global_temp_c[idx]),
+        float(global_co2_ppm[idx]),
+        params,
+    )
+    climate_twin_habitability_score = climate_twin_habitable_pct / 100.0
 
     temp_grid_c = _local_temperature_c(global_temp_c[idx], lat_deg, elevation_km, microclimate_c, params)
     tile_co2 = _tile_co2_ppm(float(global_co2_ppm[idx]), elevation_km)
-    score, temp_score, co2_score, temp_ok, co2_ok = _human_habitability(temp_grid_c, tile_co2, params)
+    score, temp_score, co2_score, temp_ok = _human_habitability(
+        temp_grid_c,
+        float(global_temp_c[idx]),
+        float(global_co2_ppm[idx]),
+        params,
+    )
     # Hard constraint from user requirement: water is always unlivable.
     score = np.where(land_mask, score, 0.0)
+    livable_mask = (score >= livable_threshold) & land_mask
 
     if show_livable_only:
-        plot_score = np.where(score >= livable_threshold, score, 0.0)
+        plot_score = np.where(livable_mask, score, 0.0)
     else:
         plot_score = score
 
-    fig = _habitability_map(lat_deg, lon_deg, plot_score, land_mask, livable_threshold, int(years[idx]))
+    fig = _habitability_map(lat_deg, lon_deg, plot_score, land_mask, livable_mask, int(years[idx]))
     if not auto_center:
         center_col1, center_col2 = st.columns(2)
         center_lat = center_col1.slider("Center Latitude", min_value=-90, max_value=90, value=PLANET_VIEW_LAT)
@@ -588,43 +632,29 @@ def render_map_page():
 
     with st.container(border=True):
         st.subheader("Map Statistics")
-        livable_mask = (score >= livable_threshold) & land_mask
-        perfect_mask = score >= 0.80
-        hard_unlivable_mask = (~temp_ok | ~co2_ok) & land_mask
+        perfect_mask = (score >= 0.80) & land_mask
+        hard_unlivable_mask = (~temp_ok) & land_mask
         land_fraction = 100.0 * float(np.mean(land_mask))
         livable_on_land = 100.0 * float(np.sum(livable_mask) / max(1.0, np.sum(land_mask)))
         hard_unlivable_on_land = 100.0 * float(np.sum(hard_unlivable_mask) / max(1.0, np.sum(land_mask)))
-        map_livable_global_pct = 100.0 * float(np.mean(livable_mask))
-        map_mean_score = float(np.mean(score))
+        map_livable_global_pct = float(climate_twin_habitable_pct)
+        threshold_livable_global_pct = 100.0 * float(np.mean(livable_mask))
         stats_lines = [
             f"- Texture seed (same as screen 1): {texture_seed}",
             f"- Land area: {land_fraction:.1f}% (water is forced unlivable)",
             f"- Global temperature: {float(global_temp_c[idx]):.2f} C",
             f"- Global CO2: {float(global_co2_ppm[idx]):.1f} ppm",
+            f"- Mean habitability score (Climate Twin formula): {climate_twin_habitability_score:.3f}",
+            f"- Non-red area (Climate Twin formula): {map_livable_global_pct:.1f}%",
         ]
-        if official_habitable_pct is not None and official_habitability_score is not None:
-            stats_lines.extend(
-                [
-                    f"- Mean habitability score (from Climate Twin): {official_habitability_score:.3f}",
-                    f"- Livable area (from Climate Twin): {official_habitable_pct:.1f}%",
-                ]
-            )
-        else:
-            stats_lines.extend(
-                [
-                    f"- Mean habitability score (map fallback): {map_mean_score:.3f}",
-                    f"- Livable area (map fallback, score >= {livable_threshold:.2f}): {map_livable_global_pct:.1f}%",
-                    "- Climate Twin cache not found for this scenario. Open screen 01 to sync exact habitability values.",
-                ]
-            )
         stats_lines.extend(
             [
-                f"- Map livable area (score >= {livable_threshold:.2f}): {map_livable_global_pct:.1f}%",
+                f"- Map livable area (score >= {livable_threshold:.2f}): {threshold_livable_global_pct:.1f}%",
                 f"- Livable fraction of land: {livable_on_land:.1f}%",
                 f"- Perfect area (score >= 0.80): {100.0 * float(np.mean(perfect_mask)):.1f}%",
                 (
                     f"- Hard red area on land (temp outside {params['habitable_temp_min_c']:.1f} to "
-                    f"{params['habitable_temp_max_c']:.1f} C OR CO2 > {CO2_HUMAN_MAX_SAFE_PPM:.0f} ppm): "
+                    f"{params['habitable_temp_max_c']:.1f} C): "
                     f"{hard_unlivable_on_land:.1f}%"
                 ),
                 f"- Tile temperature range: {float(np.min(temp_grid_c)):.2f} to {float(np.max(temp_grid_c)):.2f} C",
