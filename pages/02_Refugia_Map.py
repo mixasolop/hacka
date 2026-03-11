@@ -82,6 +82,7 @@ PLANET_VIEW_LAT = 26
 PLANET_VIEW_LON = -39
 PLANET_VIEW_ROLL = 23.5
 MAP_SPIN_SPEED_DEG_PER_SEC = 10.2
+DEFAULT_LIVABLE_THRESHOLD = 0.45
 EARTH_SCENARIO_PRESETS = {
     "Earth-like Baseline",
     "Carefree Civilization",
@@ -816,7 +817,7 @@ def render_map_page():
     microclimate_c = np.array(geo["microclimate_c"], dtype=float)
     land_mask = np.array(geo["land_mask"], dtype=float) >= 0.5
 
-    controls = st.columns([2.0, 1.7, 1.4])
+    controls = st.columns([2.0, 1.4])
     default_year = int(
         np.clip(
             st.session_state.get(CLIMATE_TWIN_YEAR_KEY, min(100, int(years[-1]))),
@@ -832,15 +833,8 @@ def render_map_page():
         step=1,
     )
     st.session_state[CLIMATE_TWIN_YEAR_KEY] = int(year)
-    livable_threshold = controls[1].slider(
-        "Livable Threshold",
-        min_value=0.30,
-        max_value=0.70,
-        value=0.45,
-        step=0.01,
-        help="Tile is counted as livable when habitability score is >= threshold.",
-    )
-    show_livable_only = controls[2].toggle("Show Livable Only", value=False)
+    livable_threshold = DEFAULT_LIVABLE_THRESHOLD
+    show_livable_only = controls[1].toggle("Show Livable Only", value=False)
 
     idx = int(np.argmin(np.abs(years - year)))
     climate_twin_habitable_pct = float(global_habitable_pct[idx])
