@@ -81,7 +81,7 @@ HUMAN_HABITABILITY_COLORSCALE = [
 PLANET_VIEW_LAT = 26
 PLANET_VIEW_LON = -39
 PLANET_VIEW_ROLL = 23.5
-MAP_SPIN_SPEED_DEG_PER_SEC = 6.0
+MAP_SPIN_SPEED_DEG_PER_SEC = 10.2
 
 
 def _load_current_scenario():
@@ -162,26 +162,27 @@ def _render_spinning_geo(fig: go.Figure, component_key: str, height_px: int):
     post_script = f"""
 const plot = document.getElementById('{div_id}');
 if (plot) {{
-  let spinning = true;
   const speedDegPerSec = {MAP_SPIN_SPEED_DEG_PER_SEC:.3f};
+  const interactionPauseMs = 1300;
   let angleDeg = ((plot.layout?.geo?.projection?.rotation?.lon ?? {PLANET_VIEW_LON:.3f}) + 360.0) % 360.0;
   let lastTs = performance.now();
+  let userPauseUntil = 0;
   let internalUpdate = false;
   let pending = false;
-  const stop = () => {{ spinning = false; }};
-  plot.addEventListener('pointerdown', stop, {{ passive: true }});
-  plot.addEventListener('wheel', stop, {{ passive: true }});
-  plot.addEventListener('touchstart', stop, {{ passive: true }});
-  plot.on('plotly_click', stop);
-  plot.on('plotly_doubleclick', stop);
-  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) stop(); }});
+  const pauseFromInteraction = () => {{ userPauseUntil = performance.now() + interactionPauseMs; }};
+  plot.addEventListener('pointerdown', pauseFromInteraction, {{ passive: true }});
+  plot.addEventListener('wheel', pauseFromInteraction, {{ passive: true }});
+  plot.addEventListener('touchstart', pauseFromInteraction, {{ passive: true }});
+  plot.on('plotly_click', pauseFromInteraction);
+  plot.on('plotly_doubleclick', pauseFromInteraction);
+  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) pauseFromInteraction(); }});
   plot.on('plotly_relayout', (ev) => {{
     if (internalUpdate) return;
     if (!ev) return;
     if (Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.lon') ||
         Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.lat') ||
         Object.prototype.hasOwnProperty.call(ev, 'geo.projection.rotation.roll')) {{
-      stop();
+      pauseFromInteraction();
     }}
   }});
   const applyRotation = () => {{
@@ -202,7 +203,7 @@ if (plot) {{
   const tick = (ts) => {{
     const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
     lastTs = ts;
-    if (spinning) {{
+    if (ts >= userPauseUntil) {{
       angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
       applyRotation();
     }}

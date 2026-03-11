@@ -35,7 +35,7 @@ EMISSIONS_TO_PPM_PER_YEAR = 0.8
 LATITUDE_BASE_CONTRAST_C = 24.0
 PLANET_RIGHT_TILT_DEG = 23.5
 PLANET_INITIAL_VIEW_LON_DEG = 38.0
-PLANET_SPIN_SPEED_DEG_PER_SEC = 6.0
+PLANET_SPIN_SPEED_DEG_PER_SEC = 10.2
 
 INTERNAL_MODEL_CONSTANTS = {
     "co2_baseline_ppm": CO2_BASELINE_PPM,
@@ -419,8 +419,8 @@ def _render_spinning_surface(fig: go.Figure, component_key: str, height_px: int)
     post_script = f"""
 const plot = document.getElementById('{div_id}');
 if (plot) {{
-  let spinning = true;
   const speedDegPerSec = {PLANET_SPIN_SPEED_DEG_PER_SEC:.3f};
+  const interactionPauseMs = 1300;
   const toRad = Math.PI / 180.0;
   const initialEye = plot.layout?.scene?.camera?.eye ?? {{x: 1.8, y: 1.4, z: 1.0}};
   const initialUp = plot.layout?.scene?.camera?.up ?? {{x: 0.0, y: 0.0, z: 1.0}};
@@ -428,22 +428,23 @@ if (plot) {{
   const z = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
   let angleDeg = (Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad + 360.0) % 360.0;
   let lastTs = performance.now();
+  let userPauseUntil = 0;
   let internalUpdate = false;
   let pending = false;
-  const stop = () => {{ spinning = false; }};
-  plot.addEventListener('pointerdown', stop, {{ passive: true }});
-  plot.addEventListener('wheel', stop, {{ passive: true }});
-  plot.addEventListener('touchstart', stop, {{ passive: true }});
-  plot.on('plotly_click', stop);
-  plot.on('plotly_doubleclick', stop);
-  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) stop(); }});
+  const pauseFromInteraction = () => {{ userPauseUntil = performance.now() + interactionPauseMs; }};
+  plot.addEventListener('pointerdown', pauseFromInteraction, {{ passive: true }});
+  plot.addEventListener('wheel', pauseFromInteraction, {{ passive: true }});
+  plot.addEventListener('touchstart', pauseFromInteraction, {{ passive: true }});
+  plot.on('plotly_click', pauseFromInteraction);
+  plot.on('plotly_doubleclick', pauseFromInteraction);
+  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) pauseFromInteraction(); }});
   plot.on('plotly_relayout', (ev) => {{
     if (internalUpdate) return;
     if (!ev) return;
     if (Object.prototype.hasOwnProperty.call(ev, 'scene.camera') ||
         Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye') ||
         Object.prototype.hasOwnProperty.call(ev, 'scene.camera.up')) {{
-      stop();
+      pauseFromInteraction();
     }}
   }});
   const applyCamera = () => {{
@@ -468,7 +469,7 @@ if (plot) {{
   const tick = (ts) => {{
     const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
     lastTs = ts;
-    if (spinning) {{
+    if (ts >= userPauseUntil) {{
       angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
       applyCamera();
     }}
