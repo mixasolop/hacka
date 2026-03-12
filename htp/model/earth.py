@@ -148,14 +148,15 @@ def earth_land_mask_sampled(lat_deg: np.ndarray | float, lon_deg: np.ndarray | f
     lat_arr = np.clip(lat_arr, CANONICAL_LAT_MIN_DEG, CANONICAL_LAT_MAX_DEG)
     lon_arr = wrap_longitude_deg(lon_arr)
 
-    nlat = lat_grid.size
-    nlon = lon_grid.size
+    lat_step = float(lat_grid[1] - lat_grid[0])
+    lon_step = float(lon_grid[1] - lon_grid[0])
 
-    lat_pos = (lat_arr - CANONICAL_LAT_MIN_DEG) / (CANONICAL_LAT_MAX_DEG - CANONICAL_LAT_MIN_DEG)
-    lon_pos = (lon_arr - CANONICAL_LON_MIN_DEG) / (CANONICAL_LON_MAX_DEG - CANONICAL_LON_MIN_DEG)
-
-    lat_idx = np.clip(np.floor(lat_pos * nlat).astype(int), 0, nlat - 1)
-    lon_idx = np.mod(np.floor(lon_pos * nlon).astype(int), nlon)
+    # Use nearest-cell sampling so biome placement follows the canonical land mask
+    # without the half-cell west/south bias from floor indexing.
+    lat_idx = np.rint((lat_arr - float(lat_grid[0])) / lat_step).astype(int)
+    lon_idx = np.rint((lon_arr - float(lon_grid[0])) / lon_step).astype(int)
+    lat_idx = np.clip(lat_idx, 0, lat_grid.size - 1)
+    lon_idx = np.mod(lon_idx, lon_grid.size)
 
     return land_mask[lat_idx, lon_idx]
 
@@ -239,8 +240,10 @@ def earth_surface_fields(
     snow_ice = snow_ice | south_cap_land
 
     desert_score = _desert_score(lat_deg, lon_deg, land)
-    desert_lat_ok = (np.abs(lat_deg) >= 8.0) & (np.abs(lat_deg) <= 38.0)
-    desert = land & (~snow_ice) & desert_lat_ok & (desert_score >= 0.95)
+    desert_lat_ok = (np.abs(lat_deg) >= 9.0) & (np.abs(lat_deg) <= 36.0)
+    humid_equatorial_boost = 0.18 * np.exp(-0.5 * (lat_deg / 11.0) ** 2)
+    desert_threshold = 0.98 + humid_equatorial_boost
+    desert = land & (~snow_ice) & desert_lat_ok & (desert_score >= desert_threshold)
 
     temperate = land & (~snow_ice) & (~desert)
 
@@ -249,8 +252,9 @@ def earth_surface_fields(
 
     ocean_texture = 0.10 + 0.16 * (1.0 - ocean_norm)
 
-    # More vivid green for vegetated land
-    temperate_texture = 0.56 + 0.18 * land_norm
+    # Slightly greener temperate band while preserving elevation-driven variation.
+    lat_green_bonus = 0.03 * np.clip(1.0 - np.abs(lat_deg) / 90.0, 0.0, 1.0)
+    temperate_texture = 0.58 + 0.14 * land_norm + lat_green_bonus
 
     desert_texture = 0.72 + 0.07 * np.clip(desert_score / 1.6, 0.0, 1.0)
     snow_texture = 0.95 + 0.015 * np.clip(np.abs(lat_deg) / 90.0, 0.0, 1.0)

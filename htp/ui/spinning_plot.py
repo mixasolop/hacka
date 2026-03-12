@@ -20,29 +20,63 @@ def render_spinning_surface(
 const plot = document.getElementById('{div_id}');
 if (plot) {{
   const speedDegPerSec = {float(speed_deg_per_sec):.3f};
-  const interactionPauseMs = 1300;
+  const interactionPauseMs = 420;
+  const returnDurationMs = 680;
   const toRad = Math.PI / 180.0;
+  const normalizeDeg = (deg) => ((deg % 360.0) + 360.0) % 360.0;
   const initialEye = plot.layout?.scene?.camera?.eye ?? {{x: 1.8, y: 1.4, z: 1.0}};
   const initialUp = plot.layout?.scene?.camera?.up ?? {{x: 0.0, y: 0.0, z: 1.0}};
-  const radius = Math.max(0.5, Math.hypot(initialEye.x ?? 1.8, initialEye.y ?? 1.4));
-  const z = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
-  let angleDeg = (Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad + 360.0) % 360.0;
+  const baseRadius = Math.max(0.5, Math.hypot(initialEye.x ?? 1.8, initialEye.y ?? 1.4));
+  const baseZ = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
+  let displayRadius = baseRadius;
+  let displayZ = baseZ;
+  let autoAngleDeg = normalizeDeg(Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad);
+  let displayAngleDeg = autoAngleDeg;
+  let returnStartTs = null;
+  let returnFromRadius = displayRadius;
+  let returnFromZ = displayZ;
+  let wasPaused = false;
   let lastTs = performance.now();
   let userPauseUntil = 0;
   let internalUpdate = false;
   let pending = false;
-  const pauseFromInteraction = () => {{ userPauseUntil = performance.now() + interactionPauseMs; }};
+  const syncFromCamera = () => {{
+    const eye = plot.layout?.scene?.camera?.eye;
+    if (!eye) return;
+    const x = Number(eye.x);
+    const y = Number(eye.y);
+    const z = Number(eye.z);
+    if (Number.isFinite(x) && Number.isFinite(y)) {{
+      displayRadius = Math.max(0.5, Math.hypot(x, y));
+      displayAngleDeg = normalizeDeg(Math.atan2(y, x) / toRad);
+    }}
+    if (Number.isFinite(z)) {{
+      displayZ = z;
+    }}
+  }};
+  const pauseFromInteraction = () => {{
+    syncFromCamera();
+    userPauseUntil = performance.now() + interactionPauseMs;
+    returnStartTs = null;
+  }};
   plot.addEventListener('pointerdown', pauseFromInteraction, {{ passive: true }});
   plot.addEventListener('wheel', pauseFromInteraction, {{ passive: true }});
   plot.addEventListener('touchstart', pauseFromInteraction, {{ passive: true }});
   plot.on('plotly_click', pauseFromInteraction);
   plot.on('plotly_doubleclick', pauseFromInteraction);
-  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) pauseFromInteraction(); }});
+  plot.on('plotly_relayouting', () => {{
+    if (!internalUpdate) {{
+      pauseFromInteraction();
+    }}
+  }});
   plot.on('plotly_relayout', (ev) => {{
     if (internalUpdate) return;
     if (!ev) return;
     if (Object.prototype.hasOwnProperty.call(ev, 'scene.camera') ||
         Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye') ||
+        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye.x') ||
+        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye.y') ||
+        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye.z') ||
         Object.prototype.hasOwnProperty.call(ev, 'scene.camera.up')) {{
       pauseFromInteraction();
     }}
@@ -55,9 +89,9 @@ if (plot) {{
       pending = false;
       internalUpdate = false;
     }};
-    const angleRad = angleDeg * toRad;
+    const angleRad = displayAngleDeg * toRad;
     const result = Plotly.relayout(plot, {{
-      'scene.camera.eye': {{x: radius * Math.cos(angleRad), y: radius * Math.sin(angleRad), z: z}},
+      'scene.camera.eye': {{x: displayRadius * Math.cos(angleRad), y: displayRadius * Math.sin(angleRad), z: displayZ}},
       'scene.camera.up': initialUp
     }});
     if (result && typeof result.then === 'function') {{
@@ -69,8 +103,39 @@ if (plot) {{
   const tick = (ts) => {{
     const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
     lastTs = ts;
-    if (ts >= userPauseUntil) {{
-      angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
+    const paused = ts < userPauseUntil;
+    if (paused) {{
+      wasPaused = true;
+      syncFromCamera();
+    }} else {{
+      if (wasPaused) {{
+        wasPaused = false;
+        // Resume from the current release angle instead of "catching up"
+        // to an old timeline angle to avoid visible jumps.
+        autoAngleDeg = displayAngleDeg;
+        returnStartTs = ts;
+        returnFromRadius = displayRadius;
+        returnFromZ = displayZ;
+      }}
+
+      autoAngleDeg = normalizeDeg(autoAngleDeg + speedDegPerSec * dt);
+      displayAngleDeg = autoAngleDeg;
+
+      if (returnStartTs !== null) {{
+        const progress = Math.min(1.0, (ts - returnStartTs) / returnDurationMs);
+        const eased = 1.0 - Math.pow(1.0 - progress, 2.0);
+        displayRadius = returnFromRadius + (baseRadius - returnFromRadius) * eased;
+        displayZ = returnFromZ + (baseZ - returnFromZ) * eased;
+        if (progress >= 1.0) {{
+          returnStartTs = null;
+          displayRadius = baseRadius;
+          displayZ = baseZ;
+        }}
+      }} else {{
+        displayRadius = baseRadius;
+        displayZ = baseZ;
+      }}
+
       applyCamera();
     }}
     requestAnimationFrame(tick);

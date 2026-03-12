@@ -33,11 +33,11 @@ DEFAULT_LIVABLE_THRESHOLD = 0.45
 MAP_SAMPLE_CHECK_COUNT = 8
 MAP_BODY_RADIUS = 1.0
 MAP_TEXTURE_RADIUS = 1.002
-MAP_DOT_RADIUS = 1.014
-MAP_DEBUG_DOT_RADIUS = 1.02
+MAP_DOT_RADIUS = 1.006
+MAP_DEBUG_DOT_RADIUS = 1.014
 MAP_INITIAL_VIEW_LON_DEG = 38.0
-MAP_TILT_DEG = 23.5
-MAP_EYE_RADIUS = 2.28
+MAP_TILT_DEG = 23.44
+MAP_EYE_RADIUS = 2.05
 MAP_EYE_Z = 1.08
 
 HUMAN_HABITABILITY_COLORSCALE = [
@@ -122,6 +122,19 @@ def _tile_co2_ppm(global_co2_ppm: float, elevation_km: np.ndarray):
     pressure_factor = np.vectorize(safe_exp)(exponent)
     basin_boost = 1.0 + 0.04 * np.clip(-elevation_km, 0.0, 4.0)
     return np.clip(global_co2_ppm * pressure_factor * basin_boost, 1.0, None)
+
+
+def _rotate_xyz_about_y(x: np.ndarray, y: np.ndarray, z: np.ndarray, angle_deg: float):
+    angle_rad = np.deg2rad(float(angle_deg))
+    cos_a = float(np.cos(angle_rad))
+    sin_a = float(np.sin(angle_rad))
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    z_arr = np.asarray(z, dtype=float)
+    x_rot = cos_a * x_arr + sin_a * z_arr
+    y_rot = y_arr
+    z_rot = -sin_a * x_arr + cos_a * z_arr
+    return x_rot, y_rot, z_rot
 
 
 def _sample_points_for_mask(
@@ -231,6 +244,18 @@ def _habitability_map(
         lon_deg=lon_surface_deg,
         radius=MAP_TEXTURE_RADIUS,
     )
+    body_x, body_y, body_z = _rotate_xyz_about_y(
+        xyz_body["x"],
+        xyz_body["y"],
+        xyz_body["z"],
+        MAP_TILT_DEG,
+    )
+    texture_x, texture_y, texture_z = _rotate_xyz_about_y(
+        xyz_texture["x"],
+        xyz_texture["y"],
+        xyz_texture["z"],
+        MAP_TILT_DEG,
+    )
     lon2_deg, lat2_deg = np.meshgrid(lon_deg, lat_deg)
     land_flat = np.asarray(land_mask, dtype=bool).ravel()
     lat_land = lat2_deg.ravel()[land_flat]
@@ -242,15 +267,16 @@ def _habitability_map(
         lon_deg=lon_land,
         radius=MAP_DOT_RADIUS,
     )
+    x_land, y_land, z_land = _rotate_xyz_about_y(x_land, y_land, z_land, MAP_TILT_DEG)
     custom = np.column_stack((score_land, livable_land.astype(int), lat_land, lon_land))
 
     fig = go.Figure()
     fig.add_trace(
         go.Surface(
-            x=xyz_body["x"],
-            y=xyz_body["y"],
-            z=xyz_body["z"],
-            surfacecolor=np.zeros_like(np.asarray(xyz_body["x"], dtype=float), dtype=float),
+            x=body_x,
+            y=body_y,
+            z=body_z,
+            surfacecolor=np.zeros_like(np.asarray(body_x, dtype=float), dtype=float),
             colorscale=[[0.0, "#0b1830"], [1.0, "#0b1830"]],
             cmin=0.0,
             cmax=1.0,
@@ -263,9 +289,9 @@ def _habitability_map(
     )
     fig.add_trace(
         go.Surface(
-            x=xyz_texture["x"],
-            y=xyz_texture["y"],
-            z=xyz_texture["z"],
+            x=texture_x,
+            y=texture_y,
+            z=texture_z,
             surfacecolor=np.asarray(surface_texture_full, dtype=float),
             colorscale=SURFACE_TEXTURE_COLORSCALE,
             cmin=0.0,
@@ -285,12 +311,12 @@ def _habitability_map(
                 z=z_land,
                 mode="markers",
                 marker=dict(
-                    size=3.4,
+                    size=2.8,
                     color=score_land,
                     colorscale=HUMAN_HABITABILITY_COLORSCALE,
                     cmin=0.0,
                     cmax=1.0,
-                    opacity=0.96,
+                    opacity=1.0,
                     line=dict(width=0),
                     colorbar=dict(
                         title="Human Habitability",
@@ -318,6 +344,7 @@ def _habitability_map(
             lon_deg=lon2_deg.ravel(),
             radius=MAP_DEBUG_DOT_RADIUS,
         )
+        x_all, y_all, z_all = _rotate_xyz_about_y(x_all, y_all, z_all, MAP_TILT_DEG)
         fig.add_trace(
             go.Scatter3d(
                 x=x_all,
@@ -345,6 +372,7 @@ def _habitability_map(
                 lon_deg=sample_lon,
                 radius=MAP_DEBUG_DOT_RADIUS + 0.018,
             )
+            xs, ys, zs = _rotate_xyz_about_y(xs, ys, zs, MAP_TILT_DEG)
             fig.add_trace(
                 go.Scatter3d(
                     x=xs,
@@ -370,7 +398,6 @@ def _habitability_map(
             )
 
     view_phase_rad = np.deg2rad(float(MAP_INITIAL_VIEW_LON_DEG))
-    tilt_rad = np.deg2rad(float(MAP_TILT_DEG))
     fig.update_layout(
         margin=dict(l=0, r=0, t=30, b=0),
         height=590,
@@ -390,7 +417,7 @@ def _habitability_map(
                     y=MAP_EYE_RADIUS * float(np.sin(view_phase_rad)),
                     z=MAP_EYE_Z,
                 ),
-                up=dict(x=float(np.sin(tilt_rad)), y=0.0, z=float(np.cos(tilt_rad))),
+                up=dict(x=0.0, y=0.0, z=1.0),
             ),
         ),
         showlegend=bool(show_debug_overlay),

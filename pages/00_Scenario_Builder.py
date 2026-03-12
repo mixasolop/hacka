@@ -48,7 +48,7 @@ st.set_page_config(page_title="Scenario Builder", layout="wide")
 
 PLANET_RIGHT_TILT_DEG = 23.5
 PLANET_INITIAL_VIEW_LON_DEG = 38.0
-PLANET_SPIN_SPEED_DEG_PER_SEC = 10.2
+PLANET_SPIN_SPEED_DEG_PER_SEC = 12.8
 STELLAR_FLUX_INPUT_MIN = BOUNDS["stellar_flux_multiplier"][0]
 STELLAR_FLUX_INPUT_MAX = BOUNDS["stellar_flux_multiplier"][1]
 CO2_INPUT_MIN = BOUNDS["initial_co2_ppm"][0]
@@ -131,40 +131,43 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
     brightness = (0.72 + 0.35 * (1.0 - albedo + 0.2)) * light
     color = np.clip(np.array([base_r, base_g, base_b]) * brightness, 0, 1)
 
-    c0 = np.clip(color * np.array([0.15, 0.30, 0.90]), 0, 1)
-    c1 = np.clip(color * np.array([0.30, 0.65, 1.05]), 0, 1)
-    c2 = np.clip(color * np.array([0.92, 0.84, 0.56]), 0, 1)
-    c3 = np.clip(color * np.array([0.42, 0.88, 0.42]), 0, 1)
-    c4 = np.clip(color * np.array([0.23, 0.60, 0.28]), 0, 1)
-    c5 = np.clip(color * np.array([0.60, 0.58, 0.55]), 0, 1)
-    c6 = np.array([0.96, 0.97, 1.0])
+    c0 = np.clip(color * np.array([0.14, 0.30, 0.92]), 0, 1)  # Deep ocean
+    c1 = np.clip(color * np.array([0.24, 0.55, 1.08]), 0, 1)  # Shallow ocean
+    c2 = np.clip(color * np.array([0.26, 0.78, 0.34]), 0, 1)  # Vegetated land
+    c3 = np.clip(color * np.array([0.18, 0.58, 0.24]), 0, 1)  # Dense vegetation
+    c4 = np.clip(color * np.array([0.68, 0.62, 0.34]), 0, 1)  # Dry grass / steppe
+    c5 = np.clip(color * np.array([0.86, 0.75, 0.46]), 0, 1)  # Desert sand
+    c6 = np.clip(color * np.array([0.62, 0.60, 0.58]), 0, 1)  # Rock / bare land
+    c7 = np.array([0.96, 0.97, 1.0])  # Snow / ice
 
     temp_norm = float(np.clip((temp_c + 40.0) / 110.0, 0.0, 1.0))
-    cold_tint = np.array([0.22, 0.48, 1.00])
-    hot_tint = np.array([1.00, 0.28, 0.10])
+    cold_tint = np.array([0.55, 0.72, 0.92])
+    hot_tint = np.array([0.98, 0.60, 0.28])
     temp_tint = (1.0 - temp_norm) * cold_tint + temp_norm * hot_tint
 
-    c0 = np.clip(0.80 * c0 + 0.20 * temp_tint, 0, 1)
-    c1 = np.clip(0.75 * c1 + 0.25 * temp_tint, 0, 1)
-    c2 = np.clip(0.55 * c2 + 0.45 * temp_tint, 0, 1)
-    c3 = np.clip(0.55 * c3 + 0.45 * temp_tint, 0, 1)
-    c4 = np.clip(0.55 * c4 + 0.45 * temp_tint, 0, 1)
-    c5 = np.clip(0.55 * c5 + 0.45 * temp_tint, 0, 1)
+    c0 = np.clip(0.85 * c0 + 0.15 * temp_tint, 0, 1)
+    c1 = np.clip(0.82 * c1 + 0.18 * temp_tint, 0, 1)
+    c2 = np.clip(0.88 * c2 + 0.12 * temp_tint, 0, 1)
+    c3 = np.clip(0.90 * c3 + 0.10 * temp_tint, 0, 1)
+    c4 = np.clip(0.75 * c4 + 0.25 * temp_tint, 0, 1)
+    c5 = np.clip(0.70 * c5 + 0.30 * temp_tint, 0, 1)
+    c6 = np.clip(0.72 * c6 + 0.28 * temp_tint, 0, 1)
 
     colorscale = [
         [0.00, f"rgb({int(255 * c0[0])}, {int(255 * c0[1])}, {int(255 * c0[2])})"],
-        [0.28, f"rgb({int(255 * c1[0])}, {int(255 * c1[1])}, {int(255 * c1[2])})"],
-        [0.47, f"rgb({int(255 * c2[0])}, {int(255 * c2[1])}, {int(255 * c2[2])})"],
-        [0.63, f"rgb({int(255 * c3[0])}, {int(255 * c3[1])}, {int(255 * c3[2])})"],
-        [0.80, f"rgb({int(255 * c4[0])}, {int(255 * c4[1])}, {int(255 * c4[2])})"],
-        [0.92, f"rgb({int(255 * c5[0])}, {int(255 * c5[1])}, {int(255 * c5[2])})"],
-        [1.00, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
+        [0.22, f"rgb({int(255 * c1[0])}, {int(255 * c1[1])}, {int(255 * c1[2])})"],
+        [0.54, f"rgb({int(255 * c2[0])}, {int(255 * c2[1])}, {int(255 * c2[2])})"],
+        [0.66, f"rgb({int(255 * c3[0])}, {int(255 * c3[1])}, {int(255 * c3[2])})"],
+        [0.74, f"rgb({int(255 * c4[0])}, {int(255 * c4[1])}, {int(255 * c4[2])})"],
+        [0.84, f"rgb({int(255 * c5[0])}, {int(255 * c5[1])}, {int(255 * c5[2])})"],
+        [0.94, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
+        [1.00, f"rgb({int(255 * c7[0])}, {int(255 * c7[1])}, {int(255 * c7[2])})"],
     ]
 
     # South cap uses a fixed snow tint while geometry/texture are built in htp.model.planet_surface.
     south_cap_colorscale = [
-        [0.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
-        [1.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
+        [0.0, f"rgb({int(255 * c7[0])}, {int(255 * c7[1])}, {int(255 * c7[2])})"],
+        [1.0, f"rgb({int(255 * c7[0])}, {int(255 * c7[1])}, {int(255 * c7[2])})"],
     ]
 
     fig = go.Figure(
@@ -196,7 +199,7 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
         ]
     )
     view_phase_rad = np.deg2rad(float(PLANET_INITIAL_VIEW_LON_DEG))
-    eye_radius = 2.05 + 0.25 * radius_scale
+    eye_radius = 1.90 + 0.22 * radius_scale
     eye_x = eye_radius * float(np.cos(view_phase_rad))
     eye_y = eye_radius * float(np.sin(view_phase_rad))
     eye_z = 0.98 + 0.14 * radius_scale
