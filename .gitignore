@@ -1,12 +1,12 @@
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Virtual environment
 venv/
 .venv/
 .env/
-htp/
 .htp/
 
 # IDE

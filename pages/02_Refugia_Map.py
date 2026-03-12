@@ -2,9 +2,7 @@ import json
 
 import numpy as np
 import plotly.graph_objects as go
-import plotly.io as pio
 import streamlit as st
-import streamlit.components.v1 as components
 
 from htp.model.constants import SIM_DT_YEARS_DEFAULT, SIM_YEARS_DEFAULT
 from htp.model.latitude import evaluate_local_human_habitability
@@ -24,6 +22,7 @@ from htp.model.earth import (
     surface_grid_to_xyz,
     visual_alignment_report,
 )
+from htp.ui.spinning_plot import render_spinning_surface
 
 st.set_page_config(page_title="Refugia Map", layout="wide")
 
@@ -99,83 +98,6 @@ def _simulate_global_series(signature: str, scenario_json: str):
         "co2_ppm": np.asarray(series["co2_ppm"], dtype=float).tolist(),
         "habitable_surface_percent": np.asarray(series["habitable_surface_percent"], dtype=float).tolist(),
     }
-
-
-def _render_spinning_surface(fig: go.Figure, component_key: str, height_px: int):
-    div_id = f"{component_key}_plot"
-    post_script = f"""
-const plot = document.getElementById('{div_id}');
-if (plot) {{
-  const speedDegPerSec = {MAP_SPIN_SPEED_DEG_PER_SEC:.3f};
-  const interactionPauseMs = 1300;
-  const toRad = Math.PI / 180.0;
-  const initialEye = plot.layout?.scene?.camera?.eye ?? {{x: 1.8, y: 1.4, z: 1.0}};
-  const initialUp = plot.layout?.scene?.camera?.up ?? {{x: 0.0, y: 0.0, z: 1.0}};
-  const radius = Math.max(0.5, Math.hypot(initialEye.x ?? 1.8, initialEye.y ?? 1.4));
-  const z = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
-  let angleDeg = (Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad + 360.0) % 360.0;
-  let lastTs = performance.now();
-  let userPauseUntil = 0;
-  let internalUpdate = false;
-  let pending = false;
-  const pauseFromInteraction = () => {{ userPauseUntil = performance.now() + interactionPauseMs; }};
-  plot.addEventListener('pointerdown', pauseFromInteraction, {{ passive: true }});
-  plot.addEventListener('wheel', pauseFromInteraction, {{ passive: true }});
-  plot.addEventListener('touchstart', pauseFromInteraction, {{ passive: true }});
-  plot.on('plotly_click', pauseFromInteraction);
-  plot.on('plotly_doubleclick', pauseFromInteraction);
-  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) pauseFromInteraction(); }});
-  plot.on('plotly_relayout', (ev) => {{
-    if (internalUpdate) return;
-    if (!ev) return;
-    if (Object.prototype.hasOwnProperty.call(ev, 'scene.camera') ||
-        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye') ||
-        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.up')) {{
-      pauseFromInteraction();
-    }}
-  }});
-  const applyCamera = () => {{
-    if (pending) return;
-    pending = true;
-    internalUpdate = true;
-    const finalize = () => {{
-      pending = false;
-      internalUpdate = false;
-    }};
-    const angleRad = angleDeg * toRad;
-    const result = Plotly.relayout(plot, {{
-      'scene.camera.eye': {{x: radius * Math.cos(angleRad), y: radius * Math.sin(angleRad), z: z}},
-      'scene.camera.up': initialUp
-    }});
-    if (result && typeof result.then === 'function') {{
-      result.then(finalize).catch(finalize);
-    }} else {{
-      finalize();
-    }}
-  }};
-  const tick = (ts) => {{
-    const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
-    lastTs = ts;
-    if (ts >= userPauseUntil) {{
-      angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
-      applyCamera();
-    }}
-    requestAnimationFrame(tick);
-  }};
-  requestAnimationFrame(tick);
-}}
-"""
-    html = pio.to_html(
-        fig,
-        include_plotlyjs="inline",
-        full_html=False,
-        default_width="100%",
-        default_height=f"{int(height_px)}px",
-        div_id=div_id,
-        post_script=post_script,
-        config={"displayModeBar": True, "responsive": True},
-    )
-    components.html(html, height=int(height_px) + 12, scrolling=False)
 
 
 @st.cache_data(show_spinner=False)
@@ -599,7 +521,12 @@ def render_map_page():
         show_dots=show_dots,
         alignment_debug=alignment_debug,
     )
-    _render_spinning_surface(fig, component_key="refugia_map_globe", height_px=590)
+    render_spinning_surface(
+        fig,
+        component_key="refugia_map_globe",
+        height_px=590,
+        speed_deg_per_sec=MAP_SPIN_SPEED_DEG_PER_SEC,
+    )
 
     alignment_report = alignment_debug["report"]
     land_samples = alignment_debug["land_samples"]

@@ -1,12 +1,6 @@
-﻿import json
-
 import numpy as np
 import plotly.graph_objects as go
-import plotly.io as pio
 import streamlit as st
-import streamlit.components.v1 as components
-import urllib.parse
-import urllib.request
 
 from htp.model.bounds import BOUNDS
 from htp.model.constants import (
@@ -32,10 +26,23 @@ from htp.model.constants import (
     WEATHERING_TEMP_SENS,
 )
 from htp.model.imports import normalize_imported_planet_flat
+from htp.model.planet_surface import build_planet_surface_mesh
 from htp.model.scenario_io import export_scenario_json, scenario_from_flat_params, scenario_to_flat_params
 from htp.model.safety import safe_float
 from htp.model.simulate import preview_state
-from htp.model.earth import earth_surface_fields, prepare_surface_render_grid, surface_grid_to_xyz
+from htp.scenarios.exoplanets import build_exoplanet_option_map, fetch_exoplanet_rows, sample_exoplanet_rows
+from htp.scenarios.presets import (
+    EARTHLIKE_POLICY_KEYS,
+    EARTHLIKE_SHARED_INITIAL_KEYS,
+    EXOPLANET_ATMOSPHERE_OPTIONS,
+    PRESETS,
+    REMOVED_UI_KEYS,
+    SCENARIO_ALL_KEYS,
+    is_exoplanet_preset_name,
+    is_known_preset_name,
+)
+from htp.ui.indicators import badge, kpi_card, section_header, status_color
+from htp.ui.spinning_plot import render_spinning_surface
 
 st.set_page_config(page_title="Scenario Builder", layout="wide")
 
@@ -54,7 +61,6 @@ HAB_TEMP_MIN = BOUNDS["habitable_temp_min_c"][0]
 HAB_TEMP_MAX = BOUNDS["habitable_temp_max_c"][1]
 SEED_MIN = int(BOUNDS["seed"][0])
 SEED_MAX = int(BOUNDS["seed"][1])
-EXOPLANET_ATMOSPHERE_OPTIONS = ("Minimal", "Earth-like", "Dense", "Custom")
 
 INTERNAL_MODEL_CONSTANTS = {
     "co2_baseline_ppm": CO2_BASELINE_PPM,
@@ -77,231 +83,21 @@ INTERNAL_MODEL_CONSTANTS = {
     "planet_radius_km": DEFAULT_PLANET_RADIUS_KM,
 }
 
-REMOVED_UI_KEYS = (
-    "planet_radius_km",
-    "orbital_distance_au",
-    "seasonality_amplitude",
-    "obliquity_deg",
-    "ice_transition_temp_c",
-    "heat_transport_strength",
-    "climate_heat_capacity",
-    "volcanic_outgassing",
-    "weathering_strength",
-    "biosphere_uptake_strength",
-    "carbon_removal_sensitivity",
-    "carbon_capture_rate",
-    "seasonality_enabled",
-)
-
-EARTHLIKE_PLANET_BASE = {
-    "stellar_flux_multiplier": 1.00,
-    "enable_seasonality": True,
-    "warm_albedo": 0.30,
-    "ice_albedo": 0.62,
-    "initial_co2_ppm": 420.0,
-    "habitability_profile": "Liquid Water",
-    "habitable_temp_min_c": 0.0,
-    "habitable_temp_max_c": 45.0,
-    "K_CO2": DEFAULT_K_CO2,
-    "seed": 42,
-    "natural_planet_mode": False,
-    "atmosphere_assumption": None,
-    "imported_equilibrium_temperature_k": None,
-    "imported_stellar_flux_multiplier": None,
-    "import_classification": None,
-}
-EARTHLIKE_CIV_BASELINE = {
-    "emissions_rate": 1.0,
-    "emissions_growth_mode": "Constant",
-    "mitigation_start_year": 40,
-    "mitigation_strength": 0.15,
-}
-EARTHLIKE_CIV_CAREFREE = {
-    "emissions_rate": 4.8,
-    "emissions_growth_mode": "Carefree",
-    "mitigation_start_year": 120,
-    "mitigation_strength": 0.02,
-}
-EARTHLIKE_CIV_STABILIZATION = {
-    "emissions_rate": 2.0,
-    "emissions_growth_mode": "Stabilization",
-    "mitigation_start_year": 5,
-    "mitigation_strength": 0.78,
-}
-
-EARTHLIKE_SHARED_INITIAL_KEYS = tuple(EARTHLIKE_PLANET_BASE.keys())
-EARTHLIKE_POLICY_KEYS = (
-    "emissions_rate",
-    "emissions_growth_mode",
-    "mitigation_start_year",
-    "mitigation_strength",
-)
-SCENARIO_INPUT_KEYS = (
-    "stellar_flux_multiplier",
-    "enable_seasonality",
-    "warm_albedo",
-    "ice_albedo",
-    "initial_co2_ppm",
-    "emissions_rate",
-    "emissions_growth_mode",
-    "mitigation_start_year",
-    "mitigation_strength",
-    "habitability_profile",
-    "habitable_temp_min_c",
-    "habitable_temp_max_c",
-)
-SCENARIO_HIDDEN_KEYS = (
-    "K_CO2",
-    "seed",
-    "natural_planet_mode",
-    "atmosphere_assumption",
-    "imported_equilibrium_temperature_k",
-    "imported_stellar_flux_multiplier",
-    "import_classification",
-)
-SCENARIO_ALL_KEYS = SCENARIO_INPUT_KEYS + SCENARIO_HIDDEN_KEYS
-
-
-def _merge_planet_and_civ(planet: dict, civ: dict):
-    merged = dict(planet)
-    merged.update(civ)
-    return merged
-
-PRESETS = {
-    "Earth-like Baseline": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_BASELINE),
-    "Carefree Civilization": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_CAREFREE),
-    "Stabilization Policy": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_STABILIZATION),
-    "Snowball-Prone World": _merge_planet_and_civ(
-        {
-            **EARTHLIKE_PLANET_BASE,
-            "stellar_flux_multiplier": 0.86,
-            "warm_albedo": 0.34,
-            "ice_albedo": 0.78,
-            "initial_co2_ppm": 260.0,
-            "habitability_profile": "Conservative Biosphere",
-            "habitable_temp_min_c": -5.0,
-            "habitable_temp_max_c": 35.0,
-            "seed": 43,
-        },
-        {
-            "emissions_rate": 1.0,
-            "emissions_growth_mode": "Constant",
-            "mitigation_start_year": 40,
-            "mitigation_strength": 0.25,
-        },
-    ),
-    "Runaway-Prone World": _merge_planet_and_civ(
-        {
-            **EARTHLIKE_PLANET_BASE,
-            "stellar_flux_multiplier": 1.12,
-            "warm_albedo": 0.23,
-            "ice_albedo": 0.52,
-            "initial_co2_ppm": 700.0,
-            "habitability_profile": "Broad Microbial Tolerance",
-            "habitable_temp_min_c": 0.0,
-            "habitable_temp_max_c": 50.0,
-            "seed": 44,
-        },
-        {
-            "emissions_rate": 5.0,
-            "emissions_growth_mode": "Growing",
-            "mitigation_start_year": 120,
-            "mitigation_strength": 0.08,
-        },
-    ),
-}
-
-EXOPLANET_ARCHIVE_TAP_URL = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
-EXOPLANET_ARCHIVE_QUERY = (
-    "select pl_name,hostname,pl_insol,pl_eqt,pl_orbeccen "
-    "from ps where default_flag=1 and pl_name is not null and pl_insol is not null"
-)
-EXOPLANET_PRESET_PREFIX = "Exoplanet: "
-EXOPLANET_SAMPLE_SIZE = 100
-
-
-def _safe_float(value, default=np.nan):
-    return safe_float(value, default)
-
-
-def _is_exoplanet_preset_name(name: str):
-    return isinstance(name, str) and name.startswith(EXOPLANET_PRESET_PREFIX)
-
-
-def _is_known_preset_name(name: str):
-    return isinstance(name, str) and (name in PRESETS or _is_exoplanet_preset_name(name))
-
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_exoplanet_rows():
-    params = urllib.parse.urlencode({"query": EXOPLANET_ARCHIVE_QUERY, "format": "json"})
-    url = f"{EXOPLANET_ARCHIVE_TAP_URL}?{params}"
-    try:
-        with urllib.request.urlopen(url, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return []
-    if not isinstance(payload, list):
-        return []
-
-    rows = []
-    for row in payload:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("pl_name", "")).strip()
-        if not name:
-            continue
-        rows.append(
-            {
-                "pl_name": name,
-                "hostname": str(row.get("hostname", "")).strip(),
-                "pl_insol": _safe_float(row.get("pl_insol")),
-                "pl_eqt": _safe_float(row.get("pl_eqt")),
-                "pl_orbeccen": _safe_float(row.get("pl_orbeccen")),
-            }
-        )
-    return rows
+    return fetch_exoplanet_rows(timeout=20.0)
 
 
 def _refresh_exoplanet_sample():
     rows = _fetch_exoplanet_rows()
-    if not rows:
-        st.session_state["exoplanet_random_sample"] = []
-        return
-    take = min(EXOPLANET_SAMPLE_SIZE, len(rows))
-    rng = np.random.default_rng()
-    idx = rng.choice(len(rows), size=take, replace=False)
-    sample = [rows[int(i)] for i in idx]
-    sample.sort(key=lambda item: str(item.get("pl_name", "")).lower())
-    st.session_state["exoplanet_random_sample"] = sample
-
-
-def _format_exoplanet_option(row: dict):
-    name = str(row.get("pl_name", "Unknown")).strip() or "Unknown"
-    host = str(row.get("hostname", "")).strip()
-    insol = _safe_float(row.get("pl_insol"))
-    eqt_k = _safe_float(row.get("pl_eqt"))
-    ecc = _safe_float(row.get("pl_orbeccen"))
-    host_suffix = f" @ {host}" if host else ""
-    insol_text = f"{insol:.2f} S_earth" if np.isfinite(insol) else "S_earth n/a"
-    eqt_text = f"{eqt_k:.0f} K" if np.isfinite(eqt_k) else "Teq n/a"
-    ecc_text = f"e={ecc:.2f}" if np.isfinite(ecc) else "e=n/a"
-    return f"{EXOPLANET_PRESET_PREFIX}{name}{host_suffix} [{insol_text}, {eqt_text}, {ecc_text}]"
+    st.session_state["exoplanet_random_sample"] = sample_exoplanet_rows(rows)
 
 
 def _build_exoplanet_option_map():
     sample = st.session_state.get("exoplanet_random_sample", [])
     if not isinstance(sample, list):
         return {}
-    mapping = {}
-    for idx, row in enumerate(sample):
-        if not isinstance(row, dict):
-            continue
-        label = _format_exoplanet_option(row)
-        if label in mapping:
-            label = f"{label} #{idx + 1}"
-        mapping[label] = row
-    return mapping
+    return build_exoplanet_option_map(sample)
 
 
 def _apply_exoplanet_preset(name: str, row: dict, atmosphere_assumption: str):
@@ -326,50 +122,14 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
     heat = max(0.0, min(1.0, (temp_c + 30.0) / 80.0))
     co2_factor = max(0.0, min(1.0, co2_ppm / 1400.0))
     light = max(0.2, min(1.3, stellar_flux / SOLAR_CONSTANT))
-
-    lat_deg = np.linspace(-89.0, 89.0, 100, dtype=float)
-    lon_deg = np.linspace(-180.0, 180.0, 100, endpoint=False, dtype=float)
-    lon2_deg, lat2_deg = np.meshgrid(lon_deg, lat_deg)
-    lon = np.deg2rad(np.asarray(lon2_deg, dtype=float))
-    lat = np.deg2rad(np.asarray(lat2_deg, dtype=float))
-    radius_scale = np.clip(radius_km / 6371.0, 0.35, 2.2)
+    mesh = build_planet_surface_mesh(temp_c=temp_c, radius_km=radius_km, nlat=100, nlon=100)
+    radius_scale = mesh.radius_scale
 
     base_r = 0.17 + 0.76 * heat
     base_g = 0.58 - 0.26 * heat + 0.08 * (1.0 - co2_factor)
     base_b = 0.88 - 0.67 * heat
     brightness = (0.72 + 0.35 * (1.0 - albedo + 0.2)) * light
     color = np.clip(np.array([base_r, base_g, base_b]) * brightness, 0, 1)
-
-    surface_fields = earth_surface_fields(lon, lat, temp_c=temp_c)
-    texture = np.asarray(surface_fields["surface_texture"], dtype=float)
-    relief = np.asarray(surface_fields["relief"], dtype=float)
-
-    # Close longitude seam and add true pole rows so the surface has no gaps.
-    lat_closed_deg, lon_closed_deg, texture_closed, relief_closed = prepare_surface_render_grid(
-        lat_deg,
-        lon_deg,
-        texture,
-        relief,
-        add_polar_caps=True,
-        wrap_longitude=True,
-    )
-    texture_closed[0, :] = 0.985
-    texture_closed[-1, :] = float(np.mean(texture[-1, :]))
-    relief_closed[0, :] = max(float(np.mean(relief[0, :])), 0.010)
-    relief_closed[-1, :] = float(np.mean(relief[-1, :]))
-
-    xyz_base = surface_grid_to_xyz(
-        lat_deg=lat_closed_deg,
-        lon_deg=lon_closed_deg,
-        radius=1.0,
-    )
-    x0 = np.asarray(xyz_base["x"], dtype=float)
-    y0 = np.asarray(xyz_base["y"], dtype=float)
-    z0 = np.asarray(xyz_base["z"], dtype=float)
-    rfield = radius_scale * (1.0 + relief_closed)
-    x = rfield * x0
-    y = rfield * y0
-    z = rfield * z0
 
     c0 = np.clip(color * np.array([0.15, 0.30, 0.90]), 0, 1)
     c1 = np.clip(color * np.array([0.30, 0.65, 1.05]), 0, 1)
@@ -401,28 +161,7 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
         [1.00, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
     ]
 
-    # Extra south-pole surface cap to fully hide any pinhole and guarantee a visibly wide snow circle.
-    south_cap_lat = np.array([-90.0, -72.0], dtype=float)
-    south_cap_tex = np.full((south_cap_lat.size, lon_deg.size), 0.985, dtype=float)
-    south_cap_rel = np.full((south_cap_lat.size, lon_deg.size), max(float(np.mean(relief_closed[0, :])), 0.010), dtype=float)
-    south_cap_lat_closed, south_cap_lon_closed, south_cap_tex_closed, south_cap_rel_closed = prepare_surface_render_grid(
-        south_cap_lat,
-        lon_deg,
-        south_cap_tex,
-        south_cap_rel,
-        add_polar_caps=False,
-        wrap_longitude=True,
-    )
-    south_cap_xyz = surface_grid_to_xyz(
-        lat_deg=south_cap_lat_closed,
-        lon_deg=south_cap_lon_closed,
-        radius=1.0,
-    )
-    # Lift the snow cap slightly above the globe so it cleanly overpaints the pole area.
-    south_cap_r = radius_scale * (1.0 + south_cap_rel_closed + 0.008)
-    south_cap_x = south_cap_r * np.asarray(south_cap_xyz["x"], dtype=float)
-    south_cap_y = south_cap_r * np.asarray(south_cap_xyz["y"], dtype=float)
-    south_cap_z = south_cap_r * np.asarray(south_cap_xyz["z"], dtype=float)
+    # South cap uses a fixed snow tint while geometry/texture are built in htp.model.planet_surface.
     south_cap_colorscale = [
         [0.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
         [1.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
@@ -431,20 +170,20 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
     fig = go.Figure(
         data=[
             go.Surface(
-                x=x,
-                y=y,
-                z=z,
-                surfacecolor=texture_closed,
+                x=mesh.x,
+                y=mesh.y,
+                z=mesh.z,
+                surfacecolor=mesh.texture,
                 colorscale=colorscale,
                 showscale=False,
                 lighting=dict(ambient=0.45, diffuse=0.8, specular=0.3, roughness=0.85),
                 lightposition=dict(x=120, y=80, z=200),
             ),
             go.Surface(
-                x=south_cap_x,
-                y=south_cap_y,
-                z=south_cap_z,
-                surfacecolor=south_cap_tex_closed,
+                x=mesh.south_cap_x,
+                y=mesh.south_cap_y,
+                z=mesh.south_cap_z,
+                surfacecolor=mesh.south_cap_texture,
                 colorscale=south_cap_colorscale,
                 cmin=0.0,
                 cmax=1.0,
@@ -489,17 +228,6 @@ def _risk_label(score: float):
     return "High"
 
 
-def _status_color(label: str):
-    normalized = str(label).strip().lower()
-    if normalized in {"stable", "low", "mild"}:
-        return "#2E8B57"
-    if normalized in {"marginal", "elevated", "moderate"}:
-        return "#D2A106"
-    if normalized == "cold":
-        return "#3B82C4"
-    return "#B52A2A"
-
-
 def _kpi_temperature_regime(temp_k: float):
     if temp_k < 283.0:
         return "Cold"
@@ -525,123 +253,6 @@ def _kpi_habitability_level(habitable_surface_pct: float):
     return "High"
 
 
-def _kpi_card(label: str, value: str, status: str, status_color: str | None = None):
-    color = status_color or _status_color(status)
-    st.markdown(
-        (
-            "<div style='padding:10px 12px;border-radius:10px;border:1px solid #273249;"
-            "background:#0f1626;margin-bottom:8px;'>"
-            f"<div style='font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#96a3bd;'>{label}</div>"
-            f"<div style='font-size:27px;font-weight:700;line-height:1.2;color:#f4f8ff;margin-top:4px;'>{value}</div>"
-            f"<div style='margin-top:6px;font-size:12px;font-weight:600;color:{color};'>{status}</div>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def _badge(label: str, status: str):
-    color = _status_color(status)
-    st.markdown(
-        (
-            "<div style='padding:10px 12px;border-radius:10px;border:1px solid #273249;"
-            "margin-bottom:8px;background:#10192b;display:flex;justify-content:space-between;align-items:center;'>"
-            f"<span style='font-weight:600;color:#d9e3f5;'>{label}</span>"
-            f"<span style='color:{color};font-weight:700;border:1px solid {color};"
-            f"padding:2px 8px;border-radius:999px;background:{color}22;'>{status}</span>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def _section_header(title: str, first: bool = False):
-    if not first:
-        st.markdown("<div style='height:1.3rem;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<h3 style='font-size:1.45rem;line-height:1.2;margin:0 0 0.6rem 0;'>{title}</h3>",
-        unsafe_allow_html=True,
-    )
-
-
-def _render_spinning_surface(fig: go.Figure, component_key: str, height_px: int):
-    div_id = f"{component_key}_plot"
-    # Client-side spin keeps Streamlit widgets responsive.
-    post_script = f"""
-const plot = document.getElementById('{div_id}');
-if (plot) {{
-  const speedDegPerSec = {PLANET_SPIN_SPEED_DEG_PER_SEC:.3f};
-  const interactionPauseMs = 1300;
-  const toRad = Math.PI / 180.0;
-  const initialEye = plot.layout?.scene?.camera?.eye ?? {{x: 1.8, y: 1.4, z: 1.0}};
-  const initialUp = plot.layout?.scene?.camera?.up ?? {{x: 0.0, y: 0.0, z: 1.0}};
-  const radius = Math.max(0.5, Math.hypot(initialEye.x ?? 1.8, initialEye.y ?? 1.4));
-  const z = Number.isFinite(initialEye.z) ? initialEye.z : 1.0;
-  let angleDeg = (Math.atan2(initialEye.y ?? 1.4, initialEye.x ?? 1.8) / toRad + 360.0) % 360.0;
-  let lastTs = performance.now();
-  let userPauseUntil = 0;
-  let internalUpdate = false;
-  let pending = false;
-  const pauseFromInteraction = () => {{ userPauseUntil = performance.now() + interactionPauseMs; }};
-  plot.addEventListener('pointerdown', pauseFromInteraction, {{ passive: true }});
-  plot.addEventListener('wheel', pauseFromInteraction, {{ passive: true }});
-  plot.addEventListener('touchstart', pauseFromInteraction, {{ passive: true }});
-  plot.on('plotly_click', pauseFromInteraction);
-  plot.on('plotly_doubleclick', pauseFromInteraction);
-  plot.on('plotly_relayouting', () => {{ if (!internalUpdate) pauseFromInteraction(); }});
-  plot.on('plotly_relayout', (ev) => {{
-    if (internalUpdate) return;
-    if (!ev) return;
-    if (Object.prototype.hasOwnProperty.call(ev, 'scene.camera') ||
-        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.eye') ||
-        Object.prototype.hasOwnProperty.call(ev, 'scene.camera.up')) {{
-      pauseFromInteraction();
-    }}
-  }});
-  const applyCamera = () => {{
-    if (pending) return;
-    pending = true;
-    internalUpdate = true;
-    const finalize = () => {{
-      pending = false;
-      internalUpdate = false;
-    }};
-    const angleRad = angleDeg * toRad;
-    const result = Plotly.relayout(plot, {{
-      'scene.camera.eye': {{x: radius * Math.cos(angleRad), y: radius * Math.sin(angleRad), z: z}},
-      'scene.camera.up': initialUp
-    }});
-    if (result && typeof result.then === 'function') {{
-      result.then(finalize).catch(finalize);
-    }} else {{
-      finalize();
-    }}
-  }};
-  const tick = (ts) => {{
-    const dt = Math.max(0.0, Math.min(0.2, (ts - lastTs) / 1000.0));
-    lastTs = ts;
-    if (ts >= userPauseUntil) {{
-      angleDeg = (angleDeg + speedDegPerSec * dt) % 360.0;
-      applyCamera();
-    }}
-    requestAnimationFrame(tick);
-  }};
-  requestAnimationFrame(tick);
-}}
-"""
-    html = pio.to_html(
-        fig,
-        include_plotlyjs="inline",
-        full_html=False,
-        default_width="100%",
-        default_height=f"{int(height_px)}px",
-        div_id=div_id,
-        post_script=post_script,
-        config={"displayModeBar": True, "responsive": True},
-    )
-    components.html(html, height=int(height_px) + 12, scrolling=False)
-
-
 def _initialize_state():
     defaults = PRESETS["Earth-like Baseline"]
     forced_preset_name = st.session_state.pop("force_preset_name_once", None)
@@ -658,11 +269,11 @@ def _initialize_state():
         st.session_state["preset_name"] = desired_preset_name
     else:
         current_widget_preset = st.session_state.get("preset_name")
-        if _is_known_preset_name(current_widget_preset):
+        if is_known_preset_name(current_widget_preset):
             desired_preset_name = current_widget_preset
         else:
             desired_preset_name = str(st.session_state.get("builder_persisted_preset_name", "Earth-like Baseline"))
-            if not _is_known_preset_name(desired_preset_name):
+            if not is_known_preset_name(desired_preset_name):
                 desired_preset_name = "Earth-like Baseline"
             st.session_state["preset_name"] = desired_preset_name
     st.session_state["builder_persisted_preset_name"] = desired_preset_name
@@ -840,7 +451,7 @@ def render_scenario_builder_page():
     st.markdown("**Preset Library**")
     selected_preset_name = str(st.session_state.get("preset_name", "Earth-like Baseline"))
     show_exoplanet_presets = bool(st.session_state.get("show_exoplanet_presets", False))
-    if _is_exoplanet_preset_name(selected_preset_name):
+    if is_exoplanet_preset_name(selected_preset_name):
         show_exoplanet_presets = True
         st.session_state["show_exoplanet_presets"] = True
 
@@ -883,7 +494,7 @@ def render_scenario_builder_page():
     else:
         if extra_cols[0].button("Hide Extras", type="secondary", use_container_width=True):
             st.session_state["show_exoplanet_presets"] = False
-            if _is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))):
+            if is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))):
                 _apply_preset("Earth-like Baseline")
             st.rerun()
         if extra_cols[1].button("Random 100", type="secondary", use_container_width=True):
@@ -900,14 +511,14 @@ def render_scenario_builder_page():
         )
 
     selected_exoplanet = st.session_state.get("selected_exoplanet_row")
-    if _is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))) and isinstance(selected_exoplanet, dict):
+    if is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))) and isinstance(selected_exoplanet, dict):
         pl_name = str(selected_exoplanet.get("pl_name", "Unknown")).strip() or "Unknown"
         host = str(selected_exoplanet.get("hostname", "")).strip()
         host_text = f" @ {host}" if host else ""
-        insol = _safe_float(selected_exoplanet.get("pl_insol"))
-        eqt_k = _safe_float(selected_exoplanet.get("pl_eqt"))
+        insol = safe_float(selected_exoplanet.get("pl_insol"), np.nan)
+        eqt_k = safe_float(selected_exoplanet.get("pl_eqt"), np.nan)
         eqt_c = eqt_k - 273.15 if np.isfinite(eqt_k) else np.nan
-        ecc = _safe_float(selected_exoplanet.get("pl_orbeccen"))
+        ecc = safe_float(selected_exoplanet.get("pl_orbeccen"), np.nan)
         insol_text = f"{insol:.2f} S_earth" if np.isfinite(insol) else "S_earth n/a"
         eqt_text = f"{eqt_k:.0f} K ({eqt_c:.1f} C)" if np.isfinite(eqt_k) else "Teq n/a"
         ecc_text = f"{ecc:.3f}" if np.isfinite(ecc) else "n/a"
@@ -939,34 +550,34 @@ def render_scenario_builder_page():
     habitability_level = _kpi_habitability_level(derived["habitable_surface_pct"])
     habitability_color = {"Low": "#B52A2A", "Moderate": "#D2A106", "High": "#2E8B57"}[habitability_level]
     with kpi_cols[0]:
-        _kpi_card(
+        kpi_card(
             "Global Temp",
             f"{derived['temperature_c']:.1f} \u00b0C",
             temp_regime,
-            _status_color(temp_regime),
+            status_hex=status_color(temp_regime),
         )
     with kpi_cols[1]:
-        _kpi_card(
+        kpi_card(
             "CO\u2082",
             f"{derived['co2_ppm']:.0f} ppm",
             co2_level,
         )
     with kpi_cols[2]:
-        _kpi_card(
+        kpi_card(
             "Habitable Surface",
             f"{derived['habitable_surface_pct']:.0f}%",
             habitability_level,
-            habitability_color,
+            status_hex=habitability_color,
         )
     with kpi_cols[3]:
-        _kpi_card("System State", derived["system_state"], derived["system_state"])
+        kpi_card("System State", derived["system_state"], derived["system_state"])
     with kpi_cols[4]:
-        _kpi_card("Tipping Risk", derived["tipping_label"], derived["tipping_label"])
+        kpi_card("Tipping Risk", derived["tipping_label"], derived["tipping_label"])
 
     left, right = st.columns([1.15, 1.0])
 
     with left:
-        _section_header("Star & Orbit", first=True)
+        section_header("Star & Orbit", first=True)
         st.number_input(
             "Stellar Flux Multiplier",
             min_value=STELLAR_FLUX_INPUT_MIN,
@@ -977,14 +588,14 @@ def render_scenario_builder_page():
         )
         st.toggle("Enable Seasonality", key="enable_seasonality")
 
-        _section_header("Climate")
+        section_header("Climate")
         st.slider("Warm Albedo", min_value=0.00, max_value=1.00, step=0.01, key="warm_albedo")
         st.slider("Ice Albedo", min_value=0.00, max_value=1.00, step=0.01, key="ice_albedo")
 
-        _section_header("Atmosphere & Carbon")
+        section_header("Atmosphere & Carbon")
         st.number_input("Initial CO\u2082 (ppm)", min_value=CO2_INPUT_MIN, max_value=CO2_INPUT_MAX, step=10.0, key="initial_co2_ppm")
 
-        _section_header("Civilization")
+        section_header("Civilization")
         st.slider("Emissions Rate", min_value=EMISSIONS_INPUT_MIN, max_value=EMISSIONS_INPUT_MAX, step=0.05, key="emissions_rate")
         st.selectbox(
             "Emissions Growth Mode",
@@ -994,7 +605,7 @@ def render_scenario_builder_page():
         st.number_input("Mitigation Start Year", min_value=MITIGATION_START_MIN, max_value=MITIGATION_START_MAX, step=5, key="mitigation_start_year")
         st.slider("Mitigation Strength", min_value=0.00, max_value=1.00, step=0.01, key="mitigation_strength")
 
-        _section_header("Habitability Definition")
+        section_header("Habitability Definition")
         habit_profile = st.selectbox("Profile", list(HABITABILITY_PROFILES.keys()), key="habitability_profile")
         if st.button("Apply Profile", use_container_width=False):
             tmin, tmax = HABITABILITY_PROFILES[habit_profile]
@@ -1026,7 +637,12 @@ def render_scenario_builder_page():
                 stellar_flux=derived["stellar_flux_w_m2"],
                 radius_km=DEFAULT_PLANET_RADIUS_KM,
             )
-            _render_spinning_surface(fig, component_key="scenario_builder_planet", height_px=300)
+            render_spinning_surface(
+                fig,
+                component_key="scenario_builder_planet",
+                height_px=300,
+                speed_deg_per_sec=PLANET_SPIN_SPEED_DEG_PER_SEC,
+            )
 
         with st.container(border=True):
             st.subheader("Scenario Summary")
@@ -1053,9 +669,9 @@ def render_scenario_builder_page():
 
         with st.container(border=True):
             st.subheader("Quick Risk")
-            _badge("Snowball Risk", _risk_label(derived["snowball_score"]))
-            _badge("Runaway Risk", _risk_label(derived["runaway_score"]))
-            _badge("Stability Outlook", derived["stability_outlook"])
+            badge("Snowball Risk", _risk_label(derived["snowball_score"]))
+            badge("Runaway Risk", _risk_label(derived["runaway_score"]))
+            badge("Stability Outlook", derived["stability_outlook"])
 
         with st.container(border=True):
             export_payload = _build_export_payload(scenario)

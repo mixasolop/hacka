@@ -24,7 +24,7 @@ def render_page():
     st.markdown(
         "\n".join(
             [
-                f"- Equilibrium estimate: {eq_temp_c:.2f} °C",
+                f"- Equilibrium estimate: {eq_temp_c:.2f} C",
                 f"- Effective albedo: {eq_albedo:.3f}",
                 f"- Natural planet mode: {'On' if bool(params['natural_planet_mode']) else 'Off'}",
                 f"- Mitigation schedule: start year {int(params['mitigation_start_year'])}, strength {float(params['mitigation_strength']):.2f}",

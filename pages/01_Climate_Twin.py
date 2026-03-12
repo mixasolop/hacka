@@ -13,39 +13,13 @@ from htp.model.scenario_io import (
     scenario_to_flat_params,
 )
 from htp.model.simulate import simulate_time_series
+from htp.ui.indicators import kpi_card
 
 st.set_page_config(page_title="Climate Twin", layout="wide")
 
 YEAR_KEY = "climate_twin_year"
 PLAY_KEY = "climate_twin_playing"
 SERIES_CACHE_KEY = "climate_twin_series_cache"
-
-
-def _status_color(label: str):
-    normalized = str(label).strip().lower()
-    if normalized in {"stable", "low", "high habitability"}:
-        return "#2E8B57"
-    if normalized in {"marginal", "elevated", "moderate"}:
-        return "#D2A106"
-    if normalized in {"cold", "stable cooling"}:
-        return "#3B82C4"
-    return "#B52A2A"
-
-
-def _kpi_card(label: str, value: str, status: str):
-    color = _status_color(status)
-    st.markdown(
-        (
-            "<div style='padding:10px 12px;border-radius:10px;border:1px solid #273249;"
-            "background:#0f1626;margin-bottom:8px;'>"
-            f"<div style='font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#96a3bd;'>{label}</div>"
-            f"<div style='font-size:26px;font-weight:700;line-height:1.2;color:#f4f8ff;margin-top:4px;'>{value}</div>"
-            f"<div style='margin-top:6px;font-size:12px;font-weight:600;color:{color};'>{status}</div>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
 
 def _event_color(kind: str):
     if kind == "mitigation":
@@ -189,11 +163,11 @@ def _explanation_lines(series, idx: int, params):
         lines.append("The world starts near climate limits and is sensitive to further forcing.")
 
     if dco2 > 0.9:
-        lines.append("Atmospheric CO₂ is increasing, strengthening greenhouse forcing.")
+        lines.append("Atmospheric CO2 is increasing, strengthening greenhouse forcing.")
     elif dco2 < -0.1:
-        lines.append("Atmospheric CO₂ is declining as sinks and mitigation counter emissions.")
+        lines.append("Atmospheric CO2 is declining as sinks and mitigation counter emissions.")
     else:
-        lines.append("CO₂ growth is relatively slow at this stage of the scenario.")
+        lines.append("CO2 growth is relatively slow at this stage of the scenario.")
 
     if dtemp > 0.03:
         lines.append("Surface temperature is trending upward and shifting climate conditions.")
@@ -224,7 +198,7 @@ def _explanation_lines(series, idx: int, params):
 def render_climate_twin_page():
     st.markdown("<style>[data-testid='stHeaderActionElements']{display:none;}</style>", unsafe_allow_html=True)
     st.title("Climate Twin")
-    st.caption("Track temperature, atmospheric CO₂, and habitable surface through time.")
+    st.caption("Track temperature, atmospheric CO2, and habitable surface through time.")
 
     scenario = load_scenario_from_session(st.session_state)
     params = scenario_to_flat_params(scenario)
@@ -252,19 +226,19 @@ def render_climate_twin_page():
 
     kpi_cols = st.columns(5)
     with kpi_cols[0]:
-        _kpi_card("Current Year", f"{int(round(years[idx]))}", "Timeline")
+        kpi_card("Current Year", f"{int(round(years[idx]))}", "Timeline", font_size_px=26)
     with kpi_cols[1]:
         thermal = "Cold" if current_temp_k < 283.0 else ("Mild" if current_temp_k <= 295.0 else "Hot")
-        _kpi_card("Global Temperature", f"{current_temp_c:.1f} °C", thermal)
+        kpi_card("Global Temperature", f"{current_temp_c:.1f} C", thermal, font_size_px=26)
     with kpi_cols[2]:
         ratio = current_co2 / CO2_BASELINE_PPM
         co2_level = "Low" if ratio < 1.5 else ("Elevated" if ratio < 2.5 else "High")
-        _kpi_card("Atmospheric CO₂", f"{current_co2:.0f} ppm", co2_level)
+        kpi_card("Atmospheric CO2", f"{current_co2:.0f} ppm", co2_level, font_size_px=26)
     with kpi_cols[3]:
         hab_level = "Low" if current_habitable < 40.0 else ("Moderate" if current_habitable < 75.0 else "High Habitability")
-        _kpi_card("Habitable Surface", f"{current_habitable:.1f}%", hab_level)
+        kpi_card("Habitable Surface", f"{current_habitable:.1f}%", hab_level, font_size_px=26)
     with kpi_cols[4]:
-        _kpi_card("Current Regime", current_regime, current_regime)
+        kpi_card("Current Regime", current_regime, current_regime, font_size_px=26)
 
     left_col, right_col = st.columns([1.8, 1.0])
     with left_col:
@@ -272,7 +246,7 @@ def render_climate_twin_page():
             years,
             series["global_temperature_c"],
             "Global Temperature vs Time",
-            "Temperature (°C)",
+            "Temperature (C)",
             "#FF8C42",
             int(round(years[idx])),
             events,
@@ -282,8 +256,8 @@ def render_climate_twin_page():
         co2_fig = _build_chart(
             years,
             series["co2_ppm"],
-            "Atmospheric CO₂ vs Time",
-            "CO₂ (ppm)",
+            "Atmospheric CO2 vs Time",
+            "CO2 (ppm)",
             "#66D9EF",
             int(round(years[idx])),
             events,
@@ -308,8 +282,8 @@ def render_climate_twin_page():
                 "\n".join(
                     [
                         f"- Year: {int(round(years[idx]))}",
-                        f"- Global Temp: {current_temp_c:.2f} °C ({current_temp_k:.2f} K)",
-                        f"- Atmospheric CO₂: {current_co2:.1f} ppm",
+                        f"- Global Temp: {current_temp_c:.2f} C ({current_temp_k:.2f} K)",
+                        f"- Atmospheric CO2: {current_co2:.1f} ppm",
                         f"- Habitable Surface: {current_habitable:.1f}%",
                         f"- Current Regime: {current_regime}",
                     ]
@@ -331,7 +305,7 @@ def render_climate_twin_page():
                         (
                             f"<div style='padding:4px 0;'>"
                             f"<span style='color:{color};font-weight:700;'>Year 0</span>"
-                            f"<span style='color:#d9e3f5;'> — {warning['label']}</span>"
+                            f"<span style='color:#d9e3f5;'> - {warning['label']}</span>"
                             "</div>"
                         ),
                         unsafe_allow_html=True,
@@ -352,7 +326,7 @@ def render_climate_twin_page():
                         (
                             f"<div style='padding:6px 0;'>"
                             f"<span style='color:{color};font-weight:700;'>Year {event['year']}</span>"
-                            f"<span style='color:#d9e3f5;'> — {event['label']}</span>"
+                            f"<span style='color:#d9e3f5;'> - {event['label']}</span>"
                             "</div>"
                         ),
                         unsafe_allow_html=True,
@@ -401,4 +375,3 @@ def render_climate_twin_page():
 
 
 render_climate_twin_page()
-
