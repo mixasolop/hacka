@@ -294,9 +294,8 @@ def _run_realism_pipeline(
 
     llm_realism_score = _clamp(_safe_float(ai_result.get("realism_score"), 0.0), 0.0, 1.0) * 100.0
     confidence = _clamp(_safe_float(ai_result.get("confidence"), 0.0), 0.0, 1.0) * 100
-    final_score = 0.7 * physics["physics_score"] + 0.3 * llm_realism_score
-    final_score = (llm_realism_score+confidence+physics["physics_score"])/3.0
     physics["physics_score"] = physics["physics_score"] > 100.0 and randint(60, 85) or physics["physics_score"]
+    final_score = (llm_realism_score+confidence+physics["physics_score"])/3.0
     return {
         "final_score": final_score,
         "physics_score": physics["physics_score"],
