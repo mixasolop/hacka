@@ -468,7 +468,7 @@ def render_map_page():
     surface_class = np.array(geo["surface_class"], dtype=float).astype(int)
     surface_texture = np.array(geo["surface_texture"], dtype=float)
 
-    controls = st.columns([2.0, 1.6, 1.3, 1.3, 1.2])
+    controls = st.columns([2.2, 1.4, 1.4, 1.3])
     default_year = int(
         np.clip(
             st.session_state.get(CLIMATE_TWIN_YEAR_KEY, min(100, int(round(years[-1])))),
@@ -484,21 +484,14 @@ def render_map_page():
         step=1,
     )
     st.session_state[CLIMATE_TWIN_YEAR_KEY] = int(year)
-    livable_threshold = controls[1].slider(
-        "Livable Threshold",
-        min_value=0.30,
-        max_value=0.70,
-        value=DEFAULT_LIVABLE_THRESHOLD,
-        step=0.01,
-        help="Higher threshold marks more regions as inhabitable (red).",
-    )
-    show_livable_only = controls[2].toggle("Show Livable Only", value=False)
-    show_debug_overlay = controls[3].toggle(
+    livable_threshold = float(DEFAULT_LIVABLE_THRESHOLD)
+    show_livable_only = controls[1].toggle("Show Livable Only", value=False)
+    show_debug_overlay = controls[2].toggle(
         "Debug Alignment",
         value=False,
         help="Shows texture-class dots and sampled land/ocean checks on top of the globe.",
     )
-    show_dots = controls[4].toggle(
+    show_dots = controls[3].toggle(
         "Show Dots",
         value=True,
         help="Toggle livability dots. The globe body remains fully rendered.",
