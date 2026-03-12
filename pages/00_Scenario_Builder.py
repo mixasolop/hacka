@@ -1,5 +1,4 @@
 ﻿import json
-from math import log
 
 import numpy as np
 import plotly.graph_objects as go
@@ -9,37 +8,53 @@ import streamlit.components.v1 as components
 import urllib.parse
 import urllib.request
 
+from htp.model.bounds import BOUNDS
+from htp.model.constants import (
+    ALBEDO_REF,
+    BIOSPHERE_COEFF,
+    BIOSPHERE_OPT_TEMP_C,
+    BIOSPHERE_TEMP_WIDTH_C,
+    CO2_BASELINE_PPM,
+    DEFAULT_ICE_TRANSITION_TEMP_C,
+    DEFAULT_K_CO2,
+    DEFAULT_PLANET_RADIUS_KM,
+    DEFAULT_SEASONALITY_AMPLITUDE,
+    EMISSIONS_MODES,
+    HABITABILITY_PROFILES,
+    ICE_TRANSITION_WIDTH_C,
+    K_ALBEDO,
+    K_FLUX,
+    NATURAL_OUTGASSING_PPM_PER_YEAR,
+    PREVIEW_HORIZON_YEARS,
+    REFERENCE_TEMP_C,
+    SOLAR_CONSTANT,
+    WEATHERING_COEFF,
+    WEATHERING_TEMP_SENS,
+)
+from htp.model.imports import normalize_imported_planet_flat
+from htp.model.scenario_io import export_scenario_json, scenario_from_flat_params, scenario_to_flat_params
+from htp.model.safety import safe_float
+from htp.model.simulate import preview_state
+from htp.model.earth import earth_surface_fields, prepare_surface_render_grid, surface_grid_to_xyz
+
 st.set_page_config(page_title="Scenario Builder", layout="wide")
 
-SOLAR_CONSTANT = 1361.0
-CO2_BASELINE_PPM = 280.0
-PREVIEW_HORIZON_YEARS = 100
-REFERENCE_TEMP_C = 14.8
-ALBEDO_REF = 0.30
-DEFAULT_SEASONALITY_AMPLITUDE = 0.12
-DEFAULT_ICE_TRANSITION_TEMP_C = -10.0
-ICE_TRANSITION_WIDTH_C = 5.0
-NATURAL_OUTGASSING = 0.9
-DEFAULT_WEATHERING_STRENGTH = 0.55
-DEFAULT_BIOSPHERE_UPTAKE_STRENGTH = 0.50
-BIOSPHERE_OPT_TEMP_C = 15.0
-BIOSPHERE_TEMP_WIDTH_C = 15.0
-DEFAULT_PLANET_RADIUS_KM = 6371.0
-
-# Reduced climate sensitivity coefficients for preview-only estimator.
-K_FLUX = 55.0
-K_ALBEDO = 85.0
-K_CO2 = 4.5
-WEATHERING_COEFF = 0.94 * DEFAULT_WEATHERING_STRENGTH
-WEATHERING_TEMP_SENS = 0.045
-BIOSPHERE_COEFF = 0.94 * DEFAULT_BIOSPHERE_UPTAKE_STRENGTH
-EMISSIONS_TO_PPM_PER_YEAR = 0.8
-LATITUDE_BASE_CONTRAST_C = 24.0
 PLANET_RIGHT_TILT_DEG = 23.5
 PLANET_INITIAL_VIEW_LON_DEG = 38.0
 PLANET_SPIN_SPEED_DEG_PER_SEC = 10.2
-STELLAR_FLUX_INPUT_MIN = 0.05
-STELLAR_FLUX_INPUT_MAX = 20.0
+STELLAR_FLUX_INPUT_MIN = BOUNDS["stellar_flux_multiplier"][0]
+STELLAR_FLUX_INPUT_MAX = BOUNDS["stellar_flux_multiplier"][1]
+CO2_INPUT_MIN = BOUNDS["initial_co2_ppm"][0]
+CO2_INPUT_MAX = BOUNDS["initial_co2_ppm"][1]
+EMISSIONS_INPUT_MIN = BOUNDS["emissions_rate"][0]
+EMISSIONS_INPUT_MAX = BOUNDS["emissions_rate"][1]
+MITIGATION_START_MIN = int(BOUNDS["mitigation_start_year"][0])
+MITIGATION_START_MAX = int(BOUNDS["mitigation_start_year"][1])
+HAB_TEMP_MIN = BOUNDS["habitable_temp_min_c"][0]
+HAB_TEMP_MAX = BOUNDS["habitable_temp_max_c"][1]
+SEED_MIN = int(BOUNDS["seed"][0])
+SEED_MAX = int(BOUNDS["seed"][1])
+EXOPLANET_ATMOSPHERE_OPTIONS = ("Minimal", "Earth-like", "Dense", "Custom")
 
 INTERNAL_MODEL_CONSTANTS = {
     "co2_baseline_ppm": CO2_BASELINE_PPM,
@@ -49,19 +64,16 @@ INTERNAL_MODEL_CONSTANTS = {
     "seasonality_amplitude": DEFAULT_SEASONALITY_AMPLITUDE,
     "ice_transition_temp_c": DEFAULT_ICE_TRANSITION_TEMP_C,
     "ice_transition_width_c": ICE_TRANSITION_WIDTH_C,
-    "natural_outgassing_ppm_per_year": NATURAL_OUTGASSING,
-    "weathering_strength": DEFAULT_WEATHERING_STRENGTH,
-    "biosphere_strength": DEFAULT_BIOSPHERE_UPTAKE_STRENGTH,
+    "natural_outgassing_ppm_per_year": NATURAL_OUTGASSING_PPM_PER_YEAR,
     "biosphere_opt_temp_c": BIOSPHERE_OPT_TEMP_C,
     "biosphere_temp_width_c": BIOSPHERE_TEMP_WIDTH_C,
     "k_flux": K_FLUX,
     "k_albedo": K_ALBEDO,
-    "k_co2": K_CO2,
+    "k_co2": DEFAULT_K_CO2,
     "weathering_coeff": WEATHERING_COEFF,
     "weathering_temp_sens": WEATHERING_TEMP_SENS,
     "biosphere_coeff": BIOSPHERE_COEFF,
-    "emissions_to_ppm_per_year": EMISSIONS_TO_PPM_PER_YEAR,
-    "latitude_base_contrast_c": LATITUDE_BASE_CONTRAST_C,
+    "bounds": dict(BOUNDS),
     "planet_radius_km": DEFAULT_PLANET_RADIUS_KM,
 }
 
@@ -81,24 +93,43 @@ REMOVED_UI_KEYS = (
     "seasonality_enabled",
 )
 
-EMISSIONS_MODE_MULTIPLIER = {
-    "Constant": 1.00,
-    "Growing": 1.25,
-    "Carefree": 1.55,
-    "Stabilization": 0.85,
-    "Aggressive Mitigation": 0.65,
+EARTHLIKE_PLANET_BASE = {
+    "stellar_flux_multiplier": 1.00,
+    "enable_seasonality": True,
+    "warm_albedo": 0.30,
+    "ice_albedo": 0.62,
+    "initial_co2_ppm": 420.0,
+    "habitability_profile": "Liquid Water",
+    "habitable_temp_min_c": 0.0,
+    "habitable_temp_max_c": 45.0,
+    "K_CO2": DEFAULT_K_CO2,
+    "seed": 42,
+    "natural_planet_mode": False,
+    "atmosphere_assumption": None,
+    "imported_equilibrium_temperature_k": None,
+    "imported_stellar_flux_multiplier": None,
+    "import_classification": None,
+}
+EARTHLIKE_CIV_BASELINE = {
+    "emissions_rate": 1.0,
+    "emissions_growth_mode": "Constant",
+    "mitigation_start_year": 40,
+    "mitigation_strength": 0.15,
+}
+EARTHLIKE_CIV_CAREFREE = {
+    "emissions_rate": 4.8,
+    "emissions_growth_mode": "Carefree",
+    "mitigation_start_year": 120,
+    "mitigation_strength": 0.02,
+}
+EARTHLIKE_CIV_STABILIZATION = {
+    "emissions_rate": 2.0,
+    "emissions_growth_mode": "Stabilization",
+    "mitigation_start_year": 5,
+    "mitigation_strength": 0.78,
 }
 
-EARTHLIKE_SHARED_INITIAL_KEYS = (
-    "stellar_flux_multiplier",
-    "enable_seasonality",
-    "warm_albedo",
-    "ice_albedo",
-    "initial_co2_ppm",
-    "habitability_profile",
-    "habitable_temp_min_c",
-    "habitable_temp_max_c",
-)
+EARTHLIKE_SHARED_INITIAL_KEYS = tuple(EARTHLIKE_PLANET_BASE.keys())
 EARTHLIKE_POLICY_KEYS = (
     "emissions_rate",
     "emissions_growth_mode",
@@ -119,84 +150,65 @@ SCENARIO_INPUT_KEYS = (
     "habitable_temp_min_c",
     "habitable_temp_max_c",
 )
+SCENARIO_HIDDEN_KEYS = (
+    "K_CO2",
+    "seed",
+    "natural_planet_mode",
+    "atmosphere_assumption",
+    "imported_equilibrium_temperature_k",
+    "imported_stellar_flux_multiplier",
+    "import_classification",
+)
+SCENARIO_ALL_KEYS = SCENARIO_INPUT_KEYS + SCENARIO_HIDDEN_KEYS
+
+
+def _merge_planet_and_civ(planet: dict, civ: dict):
+    merged = dict(planet)
+    merged.update(civ)
+    return merged
 
 PRESETS = {
-    "Earth-like Baseline": {
-        "stellar_flux_multiplier": 1.00,
-        "enable_seasonality": True,
-        "warm_albedo": 0.30,
-        "ice_albedo": 0.62,
-        "initial_co2_ppm": 420.0,
-        "emissions_rate": 1.0,
-        "emissions_growth_mode": "Constant",
-        "mitigation_start_year": 40,
-        "mitigation_strength": 0.15,
-        "habitability_profile": "Liquid Water",
-        "habitable_temp_min_c": 0.0,
-        "habitable_temp_max_c": 45.0,
-    },
-    "Carefree Civilization": {
-        "stellar_flux_multiplier": 1.00,
-        "enable_seasonality": True,
-        "warm_albedo": 0.30,
-        "ice_albedo": 0.62,
-        "initial_co2_ppm": 420.0,
-        "emissions_rate": 4.8,
-        "emissions_growth_mode": "Carefree",
-        "mitigation_start_year": 120,
-        "mitigation_strength": 0.02,
-        "habitability_profile": "Liquid Water",
-        "habitable_temp_min_c": 0.0,
-        "habitable_temp_max_c": 45.0,
-    },
-    "Stabilization Policy": {
-        "stellar_flux_multiplier": 1.00,
-        "enable_seasonality": True,
-        "warm_albedo": 0.30,
-        "ice_albedo": 0.62,
-        "initial_co2_ppm": 420.0,
-        "emissions_rate": 2.0,
-        "emissions_growth_mode": "Stabilization",
-        "mitigation_start_year": 5,
-        "mitigation_strength": 0.78,
-        "habitability_profile": "Liquid Water",
-        "habitable_temp_min_c": 0.0,
-        "habitable_temp_max_c": 45.0,
-    },
-    "Snowball-Prone World": {
-        "stellar_flux_multiplier": 0.86,
-        "enable_seasonality": True,
-        "warm_albedo": 0.34,
-        "ice_albedo": 0.78,
-        "initial_co2_ppm": 260.0,
-        "emissions_rate": 1.0,
-        "emissions_growth_mode": "Constant",
-        "mitigation_start_year": 40,
-        "mitigation_strength": 0.25,
-        "habitability_profile": "Conservative Biosphere",
-        "habitable_temp_min_c": -5.0,
-        "habitable_temp_max_c": 35.0,
-    },
-    "Runaway-Prone World": {
-        "stellar_flux_multiplier": 1.12,
-        "enable_seasonality": True,
-        "warm_albedo": 0.23,
-        "ice_albedo": 0.52,
-        "initial_co2_ppm": 700.0,
-        "emissions_rate": 5.0,
-        "emissions_growth_mode": "Growing",
-        "mitigation_start_year": 120,
-        "mitigation_strength": 0.08,
-        "habitability_profile": "Broad Microbial Tolerance",
-        "habitable_temp_min_c": 0.0,
-        "habitable_temp_max_c": 50.0,
-    },
-}
-
-HABITABILITY_PROFILES = {
-    "Liquid Water": (0.0, 45.0),
-    "Conservative Biosphere": (5.0, 32.0),
-    "Broad Microbial Tolerance": (-10.0, 55.0),
+    "Earth-like Baseline": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_BASELINE),
+    "Carefree Civilization": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_CAREFREE),
+    "Stabilization Policy": _merge_planet_and_civ(EARTHLIKE_PLANET_BASE, EARTHLIKE_CIV_STABILIZATION),
+    "Snowball-Prone World": _merge_planet_and_civ(
+        {
+            **EARTHLIKE_PLANET_BASE,
+            "stellar_flux_multiplier": 0.86,
+            "warm_albedo": 0.34,
+            "ice_albedo": 0.78,
+            "initial_co2_ppm": 260.0,
+            "habitability_profile": "Conservative Biosphere",
+            "habitable_temp_min_c": -5.0,
+            "habitable_temp_max_c": 35.0,
+            "seed": 43,
+        },
+        {
+            "emissions_rate": 1.0,
+            "emissions_growth_mode": "Constant",
+            "mitigation_start_year": 40,
+            "mitigation_strength": 0.25,
+        },
+    ),
+    "Runaway-Prone World": _merge_planet_and_civ(
+        {
+            **EARTHLIKE_PLANET_BASE,
+            "stellar_flux_multiplier": 1.12,
+            "warm_albedo": 0.23,
+            "ice_albedo": 0.52,
+            "initial_co2_ppm": 700.0,
+            "habitability_profile": "Broad Microbial Tolerance",
+            "habitable_temp_min_c": 0.0,
+            "habitable_temp_max_c": 50.0,
+            "seed": 44,
+        },
+        {
+            "emissions_rate": 5.0,
+            "emissions_growth_mode": "Growing",
+            "mitigation_start_year": 120,
+            "mitigation_strength": 0.08,
+        },
+    ),
 }
 
 EXOPLANET_ARCHIVE_TAP_URL = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
@@ -209,10 +221,7 @@ EXOPLANET_SAMPLE_SIZE = 100
 
 
 def _safe_float(value, default=np.nan):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float(default)
+    return safe_float(value, default)
 
 
 def _is_exoplanet_preset_name(name: str):
@@ -295,131 +304,35 @@ def _build_exoplanet_option_map():
     return mapping
 
 
-def _exoplanet_row_to_preset(row: dict):
-    preset = dict(PRESETS["Earth-like Baseline"])
-    insol = _safe_float(row.get("pl_insol"))
-    flux_multiplier = 1.0
-    if np.isfinite(insol):
-        flux_multiplier = float(np.clip(insol, STELLAR_FLUX_INPUT_MIN, STELLAR_FLUX_INPUT_MAX))
-    eqt_k = _safe_float(row.get("pl_eqt"))
-    eqt_c = eqt_k - 273.15 if np.isfinite(eqt_k) else np.nan
-    eccentricity = _safe_float(row.get("pl_orbeccen"))
-
-    preset["stellar_flux_multiplier"] = flux_multiplier
-    if np.isfinite(eccentricity):
-        preset["enable_seasonality"] = bool(eccentricity >= 0.08)
-
-    if np.isfinite(eqt_c):
-        if eqt_c <= -20:
-            preset["warm_albedo"] = 0.35
-            preset["ice_albedo"] = 0.78
-            preset["habitability_profile"] = "Conservative Biosphere"
-        elif eqt_c >= 35:
-            preset["warm_albedo"] = 0.24
-            preset["ice_albedo"] = 0.54
-            preset["habitability_profile"] = "Broad Microbial Tolerance"
-        else:
-            preset["warm_albedo"] = 0.30
-            preset["ice_albedo"] = 0.62
-            preset["habitability_profile"] = "Liquid Water"
-    elif flux_multiplier <= 0.92:
-        preset["warm_albedo"] = 0.33
-        preset["ice_albedo"] = 0.74
-        preset["habitability_profile"] = "Conservative Biosphere"
-    elif flux_multiplier >= 1.08:
-        preset["warm_albedo"] = 0.26
-        preset["ice_albedo"] = 0.56
-        preset["habitability_profile"] = "Broad Microbial Tolerance"
-    else:
-        preset["warm_albedo"] = 0.30
-        preset["ice_albedo"] = 0.62
-        preset["habitability_profile"] = "Liquid Water"
-
-    if np.isfinite(eqt_c):
-        if eqt_c < -40:
-            preset["initial_co2_ppm"] = 240.0
-        elif eqt_c < -10:
-            preset["initial_co2_ppm"] = 320.0
-        elif eqt_c < 20:
-            preset["initial_co2_ppm"] = 420.0
-        elif eqt_c < 50:
-            preset["initial_co2_ppm"] = 620.0
-        else:
-            preset["initial_co2_ppm"] = 850.0
-    elif flux_multiplier <= 0.95:
-        preset["initial_co2_ppm"] = 320.0
-    elif flux_multiplier >= 1.05:
-        preset["initial_co2_ppm"] = 620.0
-    else:
-        preset["initial_co2_ppm"] = 420.0
-
-    tmin, tmax = HABITABILITY_PROFILES[preset["habitability_profile"]]
-    preset["habitable_temp_min_c"] = float(tmin)
-    preset["habitable_temp_max_c"] = float(tmax)
-    return preset
-
-
-def _apply_exoplanet_preset(name: str, row: dict):
-    preset = _exoplanet_row_to_preset(row)
-    for key in SCENARIO_INPUT_KEYS:
-        st.session_state[key] = preset[key]
+def _apply_exoplanet_preset(name: str, row: dict, atmosphere_assumption: str):
+    raw = dict(row)
+    if atmosphere_assumption == "Custom":
+        raw["initial_co2_ppm"] = st.session_state.get("initial_co2_ppm", CO2_INPUT_MIN)
+    preset = normalize_imported_planet_flat(raw, atmosphere_assumption=atmosphere_assumption)
+    for key in SCENARIO_ALL_KEYS:
+        if key in preset:
+            st.session_state[key] = preset[key]
     st.session_state["builder_persisted_preset_name"] = name
-    st.session_state["builder_persisted_inputs"] = {key: preset[key] for key in SCENARIO_INPUT_KEYS}
+    st.session_state["builder_persisted_inputs"] = {key: st.session_state.get(key) for key in SCENARIO_ALL_KEYS}
     st.session_state["selected_exoplanet_row"] = dict(row)
+    scenario = scenario_from_flat_params(
+        _collect_inputs(),
+        preset_name=name,
+    )
+    st.session_state["submitted_scenario_snapshot"] = scenario.model_dump(mode="json")
 
 
-def _planet_surface(lon, lat, seed: int, temp_c: float):
-    rng = np.random.default_rng(seed)
-    n = np.zeros_like(lon, dtype=float)
-    for _ in range(9):
-        k1 = rng.integers(1, 7)
-        k2 = rng.integers(1, 7)
-        p1 = rng.uniform(0, 2 * np.pi)
-        p2 = rng.uniform(0, 2 * np.pi)
-        amp = rng.uniform(0.05, 0.22)
-        n += amp * np.sin(k1 * lon + p1) * np.cos(k2 * lat + p2)
-
-    n += 0.20 * np.sin(2 * lon + rng.uniform(0, 2 * np.pi))
-    n -= 0.16 * np.cos(3 * lat + rng.uniform(0, 2 * np.pi))
-    n = (n - n.min()) / (n.max() - n.min() + 1e-9)
-
-    sea_level = 0.54
-    land = n > sea_level
-    land_height = np.clip((n - sea_level) / (1 - sea_level + 1e-9), 0, 1)
-    ocean_depth = np.clip((sea_level - n) / (sea_level + 1e-9), 0, 1)
-
-    ridges = np.abs(np.sin(9 * lon + rng.uniform(0, 2 * np.pi)) * np.cos(11 * lat))
-    ridges *= np.abs(np.sin(15 * lon + rng.uniform(0, 2 * np.pi)))
-    ridges = (ridges - ridges.min()) / (ridges.max() - ridges.min() + 1e-9)
-    mountain = np.clip(0.65 * land_height + 0.55 * ridges, 0, 1)
-
-    abs_lat = np.abs(lat) / (np.pi / 2)
-    ice_threshold = np.clip(0.72 + 0.004 * temp_c, 0.56, 0.90)
-    ice = abs_lat > ice_threshold
-
-    surf = np.where(land, 0.50 + 0.32 * land_height, 0.06 + 0.26 * (1 - ocean_depth))
-    surf = np.where(land & (mountain > 0.72), 0.84 + 0.10 * mountain, surf)
-    surf = np.where(ice, 0.97, surf)
-    surf = np.clip(surf, 0, 1)
-
-    relief = np.where(land, 0.02 + 0.05 * mountain, -0.004 * ocean_depth)
-    relief = np.where(ice, relief + 0.012, relief)
-    return surf, relief
-
-
-def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: float, radius_km: float, seed: int):
+def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: float, radius_km: float):
     heat = max(0.0, min(1.0, (temp_c + 30.0) / 80.0))
     co2_factor = max(0.0, min(1.0, co2_ppm / 1400.0))
     light = max(0.2, min(1.3, stellar_flux / SOLAR_CONSTANT))
 
-    u = np.linspace(0, 2 * np.pi, 100)
-    v = np.linspace(0, np.pi, 100)
+    lat_deg = np.linspace(-89.0, 89.0, 100, dtype=float)
+    lon_deg = np.linspace(-180.0, 180.0, 100, endpoint=False, dtype=float)
+    lon2_deg, lat2_deg = np.meshgrid(lon_deg, lat_deg)
+    lon = np.deg2rad(np.asarray(lon2_deg, dtype=float))
+    lat = np.deg2rad(np.asarray(lat2_deg, dtype=float))
     radius_scale = np.clip(radius_km / 6371.0, 0.35, 2.2)
-    x0 = np.outer(np.cos(u), np.sin(v))
-    y0 = np.outer(np.sin(u), np.sin(v))
-    z0 = np.outer(np.ones_like(u), np.cos(v))
-    lon = np.arctan2(y0, x0)
-    lat = np.arcsin(np.clip(z0, -1, 1))
 
     base_r = 0.17 + 0.76 * heat
     base_g = 0.58 - 0.26 * heat + 0.08 * (1.0 - co2_factor)
@@ -427,8 +340,33 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
     brightness = (0.72 + 0.35 * (1.0 - albedo + 0.2)) * light
     color = np.clip(np.array([base_r, base_g, base_b]) * brightness, 0, 1)
 
-    texture, relief = _planet_surface(lon, lat, seed=seed, temp_c=temp_c)
-    rfield = radius_scale * (1.0 + relief)
+    surface_fields = earth_surface_fields(lon, lat, temp_c=temp_c)
+    texture = np.asarray(surface_fields["surface_texture"], dtype=float)
+    relief = np.asarray(surface_fields["relief"], dtype=float)
+
+    # Close longitude seam and add true pole rows so the surface has no gaps.
+    lat_closed_deg, lon_closed_deg, texture_closed, relief_closed = prepare_surface_render_grid(
+        lat_deg,
+        lon_deg,
+        texture,
+        relief,
+        add_polar_caps=True,
+        wrap_longitude=True,
+    )
+    texture_closed[0, :] = 0.985
+    texture_closed[-1, :] = float(np.mean(texture[-1, :]))
+    relief_closed[0, :] = max(float(np.mean(relief[0, :])), 0.010)
+    relief_closed[-1, :] = float(np.mean(relief[-1, :]))
+
+    xyz_base = surface_grid_to_xyz(
+        lat_deg=lat_closed_deg,
+        lon_deg=lon_closed_deg,
+        radius=1.0,
+    )
+    x0 = np.asarray(xyz_base["x"], dtype=float)
+    y0 = np.asarray(xyz_base["y"], dtype=float)
+    z0 = np.asarray(xyz_base["z"], dtype=float)
+    rfield = radius_scale * (1.0 + relief_closed)
     x = rfield * x0
     y = rfield * y0
     z = rfield * z0
@@ -463,18 +401,59 @@ def draw_planet(temp_c: float, co2_ppm: float, albedo: float, stellar_flux: floa
         [1.00, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
     ]
 
+    # Extra south-pole surface cap to fully hide any pinhole and guarantee a visibly wide snow circle.
+    south_cap_lat = np.array([-90.0, -72.0], dtype=float)
+    south_cap_tex = np.full((south_cap_lat.size, lon_deg.size), 0.985, dtype=float)
+    south_cap_rel = np.full((south_cap_lat.size, lon_deg.size), max(float(np.mean(relief_closed[0, :])), 0.010), dtype=float)
+    south_cap_lat_closed, south_cap_lon_closed, south_cap_tex_closed, south_cap_rel_closed = prepare_surface_render_grid(
+        south_cap_lat,
+        lon_deg,
+        south_cap_tex,
+        south_cap_rel,
+        add_polar_caps=False,
+        wrap_longitude=True,
+    )
+    south_cap_xyz = surface_grid_to_xyz(
+        lat_deg=south_cap_lat_closed,
+        lon_deg=south_cap_lon_closed,
+        radius=1.0,
+    )
+    # Lift the snow cap slightly above the globe so it cleanly overpaints the pole area.
+    south_cap_r = radius_scale * (1.0 + south_cap_rel_closed + 0.008)
+    south_cap_x = south_cap_r * np.asarray(south_cap_xyz["x"], dtype=float)
+    south_cap_y = south_cap_r * np.asarray(south_cap_xyz["y"], dtype=float)
+    south_cap_z = south_cap_r * np.asarray(south_cap_xyz["z"], dtype=float)
+    south_cap_colorscale = [
+        [0.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
+        [1.0, f"rgb({int(255 * c6[0])}, {int(255 * c6[1])}, {int(255 * c6[2])})"],
+    ]
+
     fig = go.Figure(
         data=[
             go.Surface(
                 x=x,
                 y=y,
                 z=z,
-                surfacecolor=texture,
+                surfacecolor=texture_closed,
                 colorscale=colorscale,
                 showscale=False,
                 lighting=dict(ambient=0.45, diffuse=0.8, specular=0.3, roughness=0.85),
                 lightposition=dict(x=120, y=80, z=200),
-            )
+            ),
+            go.Surface(
+                x=south_cap_x,
+                y=south_cap_y,
+                z=south_cap_z,
+                surfacecolor=south_cap_tex_closed,
+                colorscale=south_cap_colorscale,
+                cmin=0.0,
+                cmax=1.0,
+                opacity=1.0,
+                showscale=False,
+                hoverinfo="skip",
+                lighting=dict(ambient=0.62, diffuse=0.55, specular=0.06, roughness=0.96),
+                lightposition=dict(x=120, y=80, z=200),
+            ),
         ]
     )
     view_phase_rad = np.deg2rad(float(PLANET_INITIAL_VIEW_LON_DEG))
@@ -671,8 +650,8 @@ def _initialize_state():
         persisted_inputs = dict(defaults)
         st.session_state["builder_persisted_inputs"] = persisted_inputs
 
-    for key in SCENARIO_INPUT_KEYS:
-        st.session_state.setdefault(key, persisted_inputs.get(key, defaults[key]))
+    for key in SCENARIO_ALL_KEYS:
+        st.session_state.setdefault(key, persisted_inputs.get(key, defaults.get(key)))
 
     if isinstance(forced_preset_name, str) and forced_preset_name in PRESETS:
         desired_preset_name = forced_preset_name
@@ -689,10 +668,12 @@ def _initialize_state():
     st.session_state["builder_persisted_preset_name"] = desired_preset_name
     st.session_state.setdefault("show_debug", False)
     st.session_state.setdefault("texture_seed", int(np.random.randint(0, 1_000_000_000)))
+    st.session_state["texture_seed"] = int(st.session_state.get("seed", st.session_state["texture_seed"]))
     st.session_state.setdefault("submitted_scenario_snapshot", None)
     st.session_state.setdefault("show_exoplanet_presets", False)
     st.session_state.setdefault("exoplanet_random_sample", [])
     st.session_state.setdefault("selected_exoplanet_row", None)
+    st.session_state.setdefault("exoplanet_atmosphere_assumption", EXOPLANET_ATMOSPHERE_OPTIONS[0])
     for key in REMOVED_UI_KEYS:
         st.session_state.pop(key, None)
 
@@ -704,12 +685,12 @@ def _apply_preset(name: str):
     for key, value in preset.items():
         st.session_state[key] = value
     st.session_state["builder_persisted_preset_name"] = name
-    st.session_state["builder_persisted_inputs"] = {key: preset[key] for key in SCENARIO_INPUT_KEYS}
+    st.session_state["builder_persisted_inputs"] = {key: preset.get(key) for key in SCENARIO_ALL_KEYS}
     st.session_state["selected_exoplanet_row"] = None
 
 
 def _collect_inputs():
-    return {
+    data = {
         "stellar_flux_multiplier": float(st.session_state.stellar_flux_multiplier),
         "enable_seasonality": bool(st.session_state.enable_seasonality),
         "warm_albedo": float(st.session_state.warm_albedo),
@@ -722,247 +703,22 @@ def _collect_inputs():
         "habitability_profile": str(st.session_state.habitability_profile),
         "habitable_temp_min_c": float(st.session_state.habitable_temp_min_c),
         "habitable_temp_max_c": float(st.session_state.habitable_temp_max_c),
+        "K_CO2": float(st.session_state.get("K_CO2", DEFAULT_K_CO2)),
+        "seed": int(st.session_state.get("seed", 42)),
+        "natural_planet_mode": bool(st.session_state.get("natural_planet_mode", False)),
+        "atmosphere_assumption": st.session_state.get("atmosphere_assumption"),
+        "imported_equilibrium_temperature_k": st.session_state.get("imported_equilibrium_temperature_k"),
+        "imported_stellar_flux_multiplier": st.session_state.get("imported_stellar_flux_multiplier"),
+        "import_classification": st.session_state.get("import_classification"),
     }
+    if data["seed"] < SEED_MIN or data["seed"] > SEED_MAX:
+        data["seed"] = 42
+    return data
 
 
-def _selected_exoplanet_temperature_c():
-    selected_exoplanet = st.session_state.get("selected_exoplanet_row")
-    if not isinstance(selected_exoplanet, dict):
-        return None
-    eqt_k = _safe_float(selected_exoplanet.get("pl_eqt"))
-    if not np.isfinite(eqt_k):
-        return None
-    return float(eqt_k - 273.15)
-
-
-def _effective_ice_weight(temp_c: float):
-    exponent = np.clip((temp_c - DEFAULT_ICE_TRANSITION_TEMP_C) / ICE_TRANSITION_WIDTH_C, -40.0, 40.0)
-    return float(1.0 / (1.0 + np.exp(exponent)))
-
-
-def _effective_albedo(temp_c: float, warm_albedo: float, ice_albedo: float):
-    w_ice = _effective_ice_weight(temp_c)
-    alpha = warm_albedo * (1.0 - w_ice) + ice_albedo * w_ice
-    return float(np.clip(alpha, 0.0, 1.0))
-
-
-def _seasonality_amplitude(enable_seasonality: bool):
-    return DEFAULT_SEASONALITY_AMPLITUDE if enable_seasonality else 0.0
-
-
-def _temperature_from_co2(stellar_flux_multiplier: float, warm_albedo: float, ice_albedo: float, co2_ppm: float):
-    temp_c = REFERENCE_TEMP_C
-    safe_co2 = max(float(co2_ppm), 1.0)
-    for _ in range(3):
-        alpha_eff = _effective_albedo(temp_c, warm_albedo, ice_albedo)
-        temp_c = (
-            REFERENCE_TEMP_C
-            + K_FLUX * (stellar_flux_multiplier - 1.0)
-            - K_ALBEDO * (alpha_eff - ALBEDO_REF)
-            + K_CO2 * log(safe_co2 / CO2_BASELINE_PPM)
-        )
-    return float(temp_c), float(_effective_albedo(temp_c, warm_albedo, ice_albedo))
-
-
-def _human_emissions_rate(mode: str, emissions_rate: float, year: int, mitigation_start_year: int, mitigation_strength: float):
-    if mode == "Growing":
-        base = emissions_rate * (1.0 + 0.010 * year)
-    elif mode == "Carefree":
-        base = emissions_rate * (1.0 + 0.020 * year)
-    elif mode == "Stabilization":
-        if year < mitigation_start_year:
-            base = emissions_rate
-        else:
-            decay = 0.030 * max(0.1, mitigation_strength) * (year - mitigation_start_year)
-            base = emissions_rate * np.exp(-decay)
-    elif mode == "Aggressive Mitigation":
-        if year < mitigation_start_year:
-            base = emissions_rate
-        else:
-            decay = 0.060 * max(0.2, mitigation_strength) * (year - mitigation_start_year)
-            base = emissions_rate * np.exp(-decay)
-    else:
-        base = emissions_rate
-
-    if year >= mitigation_start_year and mode in {"Constant", "Growing", "Carefree"}:
-        base *= max(0.05, 1.0 - 0.85 * mitigation_strength)
-
-    return float(EMISSIONS_TO_PPM_PER_YEAR * max(0.0, base))
-
-
-def _weathering_sink(temp_c: float, co2_ppm: float):
-    temp_factor = np.exp(np.clip(WEATHERING_TEMP_SENS * (temp_c - REFERENCE_TEMP_C), -5.0, 5.0))
-    return float(WEATHERING_COEFF * (co2_ppm / CO2_BASELINE_PPM) * temp_factor)
-
-
-def _biosphere_sink(temp_c: float, co2_ppm: float):
-    gaussian = -((temp_c - BIOSPHERE_OPT_TEMP_C) ** 2) / (2.0 * BIOSPHERE_TEMP_WIDTH_C ** 2)
-    temp_factor = np.exp(np.clip(gaussian, -20.0, 0.0))
-    return float(BIOSPHERE_COEFF * (co2_ppm / CO2_BASELINE_PPM) * temp_factor)
-
-
-def _integrate_projected_co2(p, temp_c_override=None):
-    co2_ppm = max(float(p["initial_co2_ppm"]), 1.0)
-    total_human = 0.0
-
-    for year in range(PREVIEW_HORIZON_YEARS):
-        if temp_c_override is None:
-            temp_c, _ = _temperature_from_co2(
-                stellar_flux_multiplier=p["stellar_flux_multiplier"],
-                warm_albedo=p["warm_albedo"],
-                ice_albedo=p["ice_albedo"],
-                co2_ppm=co2_ppm,
-            )
-        else:
-            temp_c = float(temp_c_override)
-        e_human = _human_emissions_rate(
-            mode=p["emissions_growth_mode"],
-            emissions_rate=p["emissions_rate"],
-            year=year,
-            mitigation_start_year=p["mitigation_start_year"],
-            mitigation_strength=p["mitigation_strength"],
-        )
-        weathering = _weathering_sink(temp_c, co2_ppm)
-        biosphere = _biosphere_sink(temp_c, co2_ppm)
-        dco2_dt = e_human + NATURAL_OUTGASSING - weathering - biosphere
-        co2_ppm = max(1.0, co2_ppm + dco2_dt)
-        total_human += e_human
-
-    avg_human_emissions = total_human / PREVIEW_HORIZON_YEARS
-    return float(co2_ppm), float(avg_human_emissions)
-
-
-def _habitability_percent(temp_global_c: float, projected_co2_ppm: float, p):
-    lat_deg = np.linspace(-88.75, 88.75, 72)
-    lat_rad = np.deg2rad(lat_deg)
-
-    # Latitudinal preview field with asymmetric structure:
-    # equator can overheat in warm climates while poles stay cooler.
-    hot_anomaly = max(0.0, temp_global_c - 22.0)
-    cold_anomaly = max(0.0, 8.0 - temp_global_c)
-    albedo_contrast = max(0.0, p["ice_albedo"] - p["warm_albedo"])
-
-    equatorial_heat_excess = 5.0 + 1.25 * hot_anomaly - 0.10 * cold_anomaly
-    polar_cooling_strength = 22.0 + 0.70 * cold_anomaly + 0.90 * hot_anomaly + 8.0 * max(0.0, albedo_contrast - 0.20)
-    if p["enable_seasonality"]:
-        equatorial_heat_excess += 1.0
-        polar_cooling_strength += 2.5
-
-    equatorial_heat_excess = float(np.clip(equatorial_heat_excess, 2.5, 22.0))
-    polar_cooling_strength = float(np.clip(polar_cooling_strength, 12.0, 46.0))
-    lat_temp = (
-        temp_global_c
-        + equatorial_heat_excess * (np.cos(lat_rad) ** 2)
-        - polar_cooling_strength * (np.sin(lat_rad) ** 2)
-    )
-
-    weights = np.cos(lat_rad)
-    habitable = (lat_temp >= p["habitable_temp_min_c"]) & (lat_temp <= p["habitable_temp_max_c"])
-    habitable_frac = 100.0 * float(np.sum(weights * habitable.astype(float)) / np.sum(weights))
-
-    # Secondary correction to avoid optimistic near-total habitability in hot/high-CO2 states.
-    overheat = np.clip((temp_global_c - 30.0) / 14.0, 0.0, 1.0)
-    greenhouse_stress = np.clip((projected_co2_ppm - 600.0) / 1000.0, 0.0, 1.0)
-    spread_stress = np.clip((equatorial_heat_excess + polar_cooling_strength - 42.0) / 22.0, 0.0, 1.0)
-    habitable_frac *= 1.0 - np.clip(0.25 * overheat + 0.20 * greenhouse_stress + 0.12 * spread_stress, 0.0, 0.50)
-    return float(np.clip(habitable_frac, 0.0, 100.0))
-
-
-def _estimate_state(p, temp_c_override=None):
-    projected_co2_ppm, avg_human_emissions = _integrate_projected_co2(p, temp_c_override=temp_c_override)
-
-    if temp_c_override is None:
-        temp_c, effective_albedo = _temperature_from_co2(
-            stellar_flux_multiplier=p["stellar_flux_multiplier"],
-            warm_albedo=p["warm_albedo"],
-            ice_albedo=p["ice_albedo"],
-            co2_ppm=projected_co2_ppm,
-        )
-    else:
-        temp_c = float(temp_c_override)
-        effective_albedo = _effective_albedo(temp_c, p["warm_albedo"], p["ice_albedo"])
-    temperature_k = temp_c + 273.15
-    habitable_surface_pct = _habitability_percent(temp_c, projected_co2_ppm, p)
-    ice_weight = _effective_ice_weight(temp_c)
-    albedo_contrast = max(0.0, p["ice_albedo"] - p["warm_albedo"])
-
-    flux_cold = np.clip((1.0 - p["stellar_flux_multiplier"]) / 0.18, 0.0, 1.0)
-    snowball_score = float(
-        np.clip(
-            0.55 * ice_weight
-            + 0.25 * np.clip((albedo_contrast - 0.15) / 0.45, 0.0, 1.0)
-            + 0.20 * flux_cold,
-            0.0,
-            1.0,
-        )
-    )
-
-    runaway_score = float(
-        np.clip(
-            0.40 * np.clip((temp_c - 28.0) / 12.0, 0.0, 1.0)
-            + 0.25 * np.clip((projected_co2_ppm - 700.0) / 900.0, 0.0, 1.0)
-            + 0.20 * np.clip((p["stellar_flux_multiplier"] - 1.02) / 0.18, 0.0, 1.0)
-            + 0.15 * np.clip(avg_human_emissions / 6.0, 0.0, 1.0),
-            0.0,
-            1.0,
-        )
-    )
-
-    mitigation_effect = p["mitigation_strength"] * np.clip(
-        (PREVIEW_HORIZON_YEARS - p["mitigation_start_year"]) / PREVIEW_HORIZON_YEARS,
-        0.0,
-        1.0,
-    )
-    co2_pressure = max(0.0, log(max(projected_co2_ppm, 1.0) / CO2_BASELINE_PPM))
-    hab_center = 0.5 * (p["habitable_temp_min_c"] + p["habitable_temp_max_c"])
-    hab_half_width = max(1.0, 0.5 * (p["habitable_temp_max_c"] - p["habitable_temp_min_c"]))
-    hab_distance = abs(temp_c - hab_center) / hab_half_width
-
-    stability_score = (
-        0.06 * abs(temp_c - REFERENCE_TEMP_C)
-        + 0.90 * co2_pressure
-        + 0.12 * avg_human_emissions
-        + 0.80 * albedo_contrast
-        + 0.50 * max(0.0, hab_distance - 1.0)
-        + 0.70 * max(0.0, snowball_score - 0.60)
-        + 0.70 * max(0.0, runaway_score - 0.60)
-        - 0.90 * mitigation_effect
-    )
-    stability_score = float(max(0.0, stability_score))
-
-    if stability_score < 1.00:
-        system_state = "Stable"
-    elif stability_score < 2.00:
-        system_state = "Marginal"
-    else:
-        system_state = "Unstable"
-
-    tipping_label = {"Stable": "Low", "Marginal": "Elevated", "Unstable": "High"}[system_state]
-    tipping_score = max(snowball_score, runaway_score)
-    if tipping_score > 0.72:
-        tipping_label = "High"
-    elif tipping_score > 0.45 and tipping_label == "Low":
-        tipping_label = "Elevated"
-
-    if system_state == "Unstable" and tipping_label == "Low":
-        tipping_label = "High"
-
-    return {
-        "stellar_flux_w_m2": float(SOLAR_CONSTANT * p["stellar_flux_multiplier"]),
-        "effective_albedo": float(effective_albedo),
-        "projected_co2_ppm": float(projected_co2_ppm),
-        "temperature_c": float(temp_c),
-        "temperature_k": float(temperature_k),
-        "habitable_surface_pct": float(np.clip(habitable_surface_pct, 0.0, 100.0)),
-        "ice_fraction": float(ice_weight),
-        "snowball_score": snowball_score,
-        "runaway_score": runaway_score,
-        "stability_index": stability_score,
-        "stability_outlook": system_state,
-        "system_state": system_state,
-        "tipping_label": tipping_label,
-        "net_emissions": float(avg_human_emissions + NATURAL_OUTGASSING - _weathering_sink(temp_c, projected_co2_ppm) - _biosphere_sink(temp_c, projected_co2_ppm)),
-    }
+def _estimate_state(p):
+    scenario = scenario_from_flat_params(p, preset_name=str(st.session_state.get("preset_name", "")))
+    return preview_state(scenario, horizon_years=PREVIEW_HORIZON_YEARS)
 
 
 def _build_preset_validation_rows():
@@ -1032,27 +788,13 @@ def _run_sanity_checks():
     return checks
 
 
-def _build_export_payload(inputs, derived):
-    return {
-        "scenario": inputs,
-        "predicted_state": {
-            "global_temp_k": derived["temperature_k"],
-            "projected_co2_year100_ppm": derived["projected_co2_ppm"],
-            "habitable_surface_pct": derived["habitable_surface_pct"],
-            "system_state": derived["system_state"],
-            "tipping_risk": derived["tipping_label"],
-        },
-        "metadata": {
-            "app": "Habitat Tipping Points",
-            "screen": "Scenario Builder",
-            "preview_type": "lightweight_estimate",
-        },
-    }
+def _build_export_payload(scenario):
+    return export_scenario_json(scenario)
 
 
-def _build_runtime_payload(inputs, derived):
+def _build_runtime_payload(inputs, derived, scenario):
     return {
-        "scenario": inputs,
+        "scenario": scenario.model_dump(mode="json"),
         "predicted_state": {
             "global_temp_k": derived["temperature_k"],
             "projected_co2_year100_ppm": derived["projected_co2_ppm"],
@@ -1062,8 +804,8 @@ def _build_runtime_payload(inputs, derived):
         },
         "initial_planet_parameters": {
             "radius": DEFAULT_PLANET_RADIUS_KM,
-            "temperature_c": derived["temperature_c"],
-            "co2_ppm": derived["projected_co2_ppm"],
+            "temperature_c": derived["T0_c"],
+            "co2_ppm": derived["co2_ppm"],
             "albedo": derived["effective_albedo"],
             "stellar_energy_w_m2": derived["stellar_flux_w_m2"],
             "seasonal_change": "Yes" if inputs["enable_seasonality"] else "No",
@@ -1071,10 +813,10 @@ def _build_runtime_payload(inputs, derived):
     }
 
 
-def _build_debug_payload(inputs, derived):
+def _build_debug_payload(inputs, derived, scenario):
     sanity_checks = _run_sanity_checks()
     return {
-        "runtime_payload": _build_runtime_payload(inputs, derived),
+        "runtime_payload": _build_runtime_payload(inputs, derived, scenario),
         "internal_model_constants": INTERNAL_MODEL_CONSTANTS,
         "selected_input_snapshot": inputs,
         "sanity_checks": sanity_checks,
@@ -1122,7 +864,8 @@ def render_scenario_builder_page():
             _apply_preset(preset_name)
             st.rerun()
         elif preset_name in exoplanet_option_map:
-            _apply_exoplanet_preset(preset_name, exoplanet_option_map[preset_name])
+            assumption = str(st.session_state.get("exoplanet_atmosphere_assumption", EXOPLANET_ATMOSPHERE_OPTIONS[0]))
+            _apply_exoplanet_preset(preset_name, exoplanet_option_map[preset_name], assumption)
             st.rerun()
         else:
             st.warning("Selected preset is unavailable. Use Show More and try Random 100 again.")
@@ -1149,6 +892,12 @@ def render_scenario_builder_page():
         extra_cols[2].caption(
             f"Showing {len(exoplanet_option_map)} random planets from NASA Exoplanet Archive (PS table)."
         )
+        st.selectbox(
+            "Atmosphere Assumption",
+            EXOPLANET_ATMOSPHERE_OPTIONS,
+            key="exoplanet_atmosphere_assumption",
+            help="Used when applying an imported exoplanet preset.",
+        )
 
     selected_exoplanet = st.session_state.get("selected_exoplanet_row")
     if _is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))) and isinstance(selected_exoplanet, dict):
@@ -1165,20 +914,28 @@ def render_scenario_builder_page():
         st.caption(
             "Loaded from NASA Exoplanet Archive: "
             f"{pl_name}{host_text} | Insolation: {insol_text} | Equilibrium Temp: {eqt_text} | "
-            f"Eccentricity: {ecc_text} | Using DB temperature directly"
+            f"Eccentricity: {ecc_text} | Atmosphere: {st.session_state.get('atmosphere_assumption') or st.session_state.get('exoplanet_atmosphere_assumption')}"
         )
 
     current_inputs = _collect_inputs()
+    scenario = scenario_from_flat_params(
+        current_inputs,
+        preset_name=str(st.session_state.get("preset_name", "Earth-like Baseline")),
+    )
+    normalized_inputs = scenario_to_flat_params(scenario)
+    for key in SCENARIO_ALL_KEYS:
+        if key in normalized_inputs:
+            st.session_state[key] = normalized_inputs[key]
+    current_inputs = _collect_inputs()
     st.session_state["builder_persisted_inputs"] = dict(current_inputs)
     st.session_state["builder_persisted_preset_name"] = str(st.session_state.get("preset_name", "Earth-like Baseline"))
-    exoplanet_temp_c_override = _selected_exoplanet_temperature_c()
-    derived = _estimate_state(current_inputs, temp_c_override=exoplanet_temp_c_override)
+    derived = _estimate_state(current_inputs)
 
     st.subheader("Current Predicted State")
     st.caption("Estimated from the current parameter configuration before full simulation.")
     kpi_cols = st.columns(5)
     temp_regime = _kpi_temperature_regime(derived["temperature_k"])
-    co2_level = _kpi_status_co2(derived["projected_co2_ppm"])
+    co2_level = _kpi_status_co2(derived["co2_ppm"])
     habitability_level = _kpi_habitability_level(derived["habitable_surface_pct"])
     habitability_color = {"Low": "#B52A2A", "Moderate": "#D2A106", "High": "#2E8B57"}[habitability_level]
     with kpi_cols[0]:
@@ -1191,7 +948,7 @@ def render_scenario_builder_page():
     with kpi_cols[1]:
         _kpi_card(
             "CO\u2082",
-            f"{derived['projected_co2_ppm']:.0f} ppm",
+            f"{derived['co2_ppm']:.0f} ppm",
             co2_level,
         )
     with kpi_cols[2]:
@@ -1221,20 +978,20 @@ def render_scenario_builder_page():
         st.toggle("Enable Seasonality", key="enable_seasonality")
 
         _section_header("Climate")
-        st.slider("Warm Albedo", min_value=0.10, max_value=0.60, step=0.01, key="warm_albedo")
-        st.slider("Ice Albedo", min_value=0.30, max_value=0.90, step=0.01, key="ice_albedo")
+        st.slider("Warm Albedo", min_value=0.00, max_value=1.00, step=0.01, key="warm_albedo")
+        st.slider("Ice Albedo", min_value=0.00, max_value=1.00, step=0.01, key="ice_albedo")
 
         _section_header("Atmosphere & Carbon")
-        st.number_input("Initial CO\u2082 (ppm)", min_value=100.0, max_value=3000.0, step=10.0, key="initial_co2_ppm")
+        st.number_input("Initial CO\u2082 (ppm)", min_value=CO2_INPUT_MIN, max_value=CO2_INPUT_MAX, step=10.0, key="initial_co2_ppm")
 
         _section_header("Civilization")
-        st.slider("Emissions Rate", min_value=0.00, max_value=8.00, step=0.05, key="emissions_rate")
+        st.slider("Emissions Rate", min_value=EMISSIONS_INPUT_MIN, max_value=EMISSIONS_INPUT_MAX, step=0.05, key="emissions_rate")
         st.selectbox(
             "Emissions Growth Mode",
-            ["Constant", "Growing", "Carefree", "Stabilization", "Aggressive Mitigation"],
+            list(EMISSIONS_MODES),
             key="emissions_growth_mode",
         )
-        st.number_input("Mitigation Start Year", min_value=0, max_value=500, step=5, key="mitigation_start_year")
+        st.number_input("Mitigation Start Year", min_value=MITIGATION_START_MIN, max_value=MITIGATION_START_MAX, step=5, key="mitigation_start_year")
         st.slider("Mitigation Strength", min_value=0.00, max_value=1.00, step=0.01, key="mitigation_strength")
 
         _section_header("Habitability Definition")
@@ -1246,15 +1003,15 @@ def render_scenario_builder_page():
             st.rerun()
         st.number_input(
             "Habitable Temperature Min (\u00b0C)",
-            min_value=-80.0,
-            max_value=80.0,
+            min_value=HAB_TEMP_MIN,
+            max_value=HAB_TEMP_MAX,
             step=1.0,
             key="habitable_temp_min_c",
         )
         st.number_input(
             "Habitable Temperature Max (\u00b0C)",
-            min_value=-80.0,
-            max_value=100.0,
+            min_value=HAB_TEMP_MIN,
+            max_value=HAB_TEMP_MAX,
             step=1.0,
             key="habitable_temp_max_c",
         )
@@ -1264,11 +1021,10 @@ def render_scenario_builder_page():
             st.subheader("3D Planet Preview")
             fig = draw_planet(
                 temp_c=derived["temperature_c"],
-                co2_ppm=derived["projected_co2_ppm"],
+                co2_ppm=derived["co2_ppm"],
                 albedo=derived["effective_albedo"],
                 stellar_flux=derived["stellar_flux_w_m2"],
                 radius_km=DEFAULT_PLANET_RADIUS_KM,
-                seed=int(st.session_state.get("texture_seed", 0)),
             )
             _render_spinning_surface(fig, component_key="scenario_builder_planet", height_px=300)
 
@@ -1302,9 +1058,9 @@ def render_scenario_builder_page():
             _badge("Stability Outlook", derived["stability_outlook"])
 
         with st.container(border=True):
-            export_payload = _build_export_payload(current_inputs, derived)
-            runtime_payload = _build_runtime_payload(current_inputs, derived)
-            debug_payload = _build_debug_payload(current_inputs, derived)
+            export_payload = _build_export_payload(scenario)
+            runtime_payload = _build_runtime_payload(current_inputs, derived, scenario)
+            debug_payload = _build_debug_payload(current_inputs, derived, scenario)
 
             run_now = st.button("Run Simulation", type="primary", use_container_width=True)
 
@@ -1312,8 +1068,8 @@ def render_scenario_builder_page():
             save_pressed = action_cols[0].button("Save Scenario", type="secondary", use_container_width=True)
             action_cols[1].download_button(
                 "Export JSON",
-                data=json.dumps(export_payload, indent=2),
-                file_name="scenario_builder_payload.json",
+                data=export_payload,
+                file_name="scenario_v2.json",
                 mime="application/json",
                 use_container_width=True,
                 type="secondary",
@@ -1322,10 +1078,11 @@ def render_scenario_builder_page():
                 st.session_state["show_debug"] = not st.session_state.get("show_debug", False)
 
             if run_now:
-                submitted_seed = int(st.session_state.get("texture_seed", int(np.random.randint(0, 1_000_000_000))))
+                submitted_seed = int(current_inputs.get("seed", st.session_state.get("texture_seed", 42)))
                 st.session_state["submitted"] = True
                 st.session_state["submitted_texture_seed"] = submitted_seed
-                st.session_state["submitted_scenario_snapshot"] = dict(current_inputs)
+                st.session_state["seed"] = submitted_seed
+                st.session_state["submitted_scenario_snapshot"] = scenario.model_dump(mode="json")
                 st.session_state["params"] = runtime_payload
                 if hasattr(st, "switch_page"):
                     st.switch_page("pages/01_Climate_Twin.py")
