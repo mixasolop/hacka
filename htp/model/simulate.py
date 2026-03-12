@@ -38,7 +38,11 @@ def _natural_imported_temperature_anchor(
     scenario: ScenarioModel,
     initial_co2_ppm: float,
 ) -> tuple[float, float] | None:
-    """Return (imported_eq_c, model_eq_at_initial_forcing_c) for natural imported planets."""
+    """Return (imported_eq_c, model_eq_at_initial_forcing_c) for natural imported planets.
+
+    The model equilibrium reference is intentionally kept *unclamped* so the
+    anchor delta stays self-consistent even for extreme forcing values.
+    """
     if not bool(scenario.planet.natural_planet_mode):
         return None
     imported_teq_k = scenario.planet.imported_equilibrium_temperature_k
@@ -56,11 +60,7 @@ def _natural_imported_temperature_anchor(
         co2_ppm=initial_co2_ppm,
         K_CO2=scenario.planet.K_CO2,
     )
-    model_eq_c = clamp(
-        ensure_finite(model_eq_c, imported_eq_c),
-        temperature_clamp_min_c,
-        temperature_clamp_max_c,
-    )
+    model_eq_c = ensure_finite(model_eq_c, imported_eq_c)
     return imported_eq_c, model_eq_c
 
 
@@ -294,19 +294,20 @@ def simulate_time_series(
         if i == len(time_years) - 1:
             continue
 
-        temp_eq_c_model, _ = equilibrium_temperature_c(
+        temp_eq_c_model_raw, _ = equilibrium_temperature_c(
             stellar_flux_multiplier=s.planet.stellar_flux_multiplier,
             warm_albedo=s.planet.warm_albedo,
             ice_albedo=s.planet.ice_albedo,
             co2_ppm=co2_ppm,
             K_CO2=s.planet.K_CO2,
         )
+        temp_eq_c_model_raw = ensure_finite(temp_eq_c_model_raw, temp_c)
         if imported_anchor is not None:
             imported_eq_c, model_eq_ref_c = imported_anchor
             # Preserve forcing sensitivity while anchoring the natural-mode baseline to imported Teq.
-            temp_eq_c = imported_eq_c + (float(temp_eq_c_model) - float(model_eq_ref_c))
+            temp_eq_c = imported_eq_c + (float(temp_eq_c_model_raw) - float(model_eq_ref_c))
         else:
-            temp_eq_c = float(temp_eq_c_model)
+            temp_eq_c = float(temp_eq_c_model_raw)
         temp_eq_c = clamp(ensure_finite(temp_eq_c, temp_c), temperature_clamp_min_c, temperature_clamp_max_c)
         temp_next = temperature_relaxation_update(
             temp_c=temp_c,

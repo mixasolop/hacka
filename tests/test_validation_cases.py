@@ -78,6 +78,28 @@ def test_hot_imported_natural_mode_no_large_initial_temperature_spike():
     assert float(np.min(co2)) >= 1.0
 
 
+def test_extreme_hot_imported_natural_mode_no_initial_jump_when_co2_flat():
+    scenario = normalize_imported_planet(
+        {
+            "pl_name": "Extreme Hot Anchor",
+            "pl_insol": 100.0,
+            "pl_eqt": 805.0,
+            "pl_orbeccen": 0.1,
+        },
+        atmosphere_assumption="Minimal",
+    )
+    series = simulate_time_series(scenario, years=20, dt_years=1.0)
+    _assert_series_health(series)
+    temps = np.asarray(series["global_temperature_c"], dtype=float)
+    co2 = np.asarray(series["co2_ppm"], dtype=float)
+    expected_t0 = 805.0 - 273.15
+
+    assert np.isclose(temps[0], expected_t0, atol=1e-6)
+    assert np.allclose(co2, 1.0, atol=1e-9)
+    assert abs(float(temps[1] - temps[0])) < 1e-6
+    assert abs(float(temps[5] - temps[0])) < 1e-6
+
+
 def test_cold_imported_natural_mode_stable():
     scenario = normalize_imported_planet(
         {
