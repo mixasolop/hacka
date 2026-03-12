@@ -208,6 +208,11 @@ def render_climate_twin_page():
         _simulate_cached(signature, scenario_json, years=SIM_YEARS_DEFAULT, dt_years=SIM_DT_YEARS_DEFAULT)
     )
     _store_series_cache(signature, series)
+    meta = dict(series.get("meta", {}))
+    outside_calibrated = bool(meta.get("outside_calibrated_habitable_regime", False))
+    diagnostic_label = str(meta.get("diagnostic_label") or "Stabilized diagnostic trajectory")
+    if outside_calibrated:
+        st.caption(f"Extreme Hot World | Outside calibrated habitable regime | {diagnostic_label}")
 
     years = series["time_years"]
     events = series["events"]
@@ -278,6 +283,8 @@ def render_climate_twin_page():
     with right_col:
         with st.container(border=True):
             st.subheader("Current Snapshot")
+            if outside_calibrated:
+                st.caption(f"Outside calibrated habitable regime ({diagnostic_label})")
             st.markdown(
                 "\n".join(
                     [

@@ -25,27 +25,65 @@ from .latitude import habitability_percent_from_lat_profile, habitability_stress
 from .physics import (
     albedo_from_temperature,
     biosphere_sink_ppm_per_year,
+    co2_forcing_wm2,
     equilibrium_temperature_c,
     temperature_relaxation_update,
     weathering_sink_ppm_per_year,
 )
-from .safety import clamp, clamp_percent, ensure_finite, safe_log, sanitize_array, sanitize_state
+from .safety import clamp, clamp_percent, ensure_finite, sanitize_array, sanitize_state
 from .scenario_io import scenario_from_any
 from .schema import ScenarioModel
+
+NATURAL_ATMOSPHERE_BASELINE_CO2_PPM = {
+    "Minimal": 1.0,
+    "Earth-like": CO2_BASELINE_PPM,
+    "Dense": 5000.0,
+}
+NATURAL_ATMOSPHERE_RELAX_YEARS = 160.0
+NATURAL_IMPORTED_OUTGASSING_PPM_PER_YEAR = {
+    "Minimal": 0.06,
+    "Earth-like": 0.20,
+    "Dense": 0.40,
+}
+NATURAL_IMPORTED_MAX_CO2_RISE_PPM_PER_YEAR = {
+    "Minimal": 0.08,
+    "Earth-like": 0.28,
+    "Dense": 0.55,
+}
+NATURAL_IMPORTED_GREENHOUSE_BASELINE_CO2_PPM = 1.0
+NATURAL_IMPORTED_GREENHOUSE_TEMP_PER_WM2 = 0.25
+NATURAL_IMPORTED_GREENHOUSE_MAX_OFFSET_C = 25.0
+EXTREME_HOT_IMPORTED_THRESHOLD_C = 350.0
+EXTREME_HOT_RESPONSE_YEARS = 120.0
+EXTREME_HOT_MAX_STEP_C_PER_YEAR = 2.0
+EXTREME_HOT_ANCHOR_DELTA_CAP_C = 120.0
+EXTREME_HOT_DIAGNOSTIC_LABEL = "Stabilized diagnostic trajectory"
+REGIME_STABLE_HABITABLE_MIN_PCT = 60.0
+REGIME_UNSTABLE_HABITABLE_MAX_PCT = 20.0
+REGIME_STABLE_TEMP_MIN_C = -5.0
+REGIME_STABLE_TEMP_MAX_C = 35.0
+REGIME_UNSTABLE_TEMP_MIN_C = -35.0
+REGIME_UNSTABLE_TEMP_MAX_C = 55.0
 
 
 def _natural_imported_temperature_anchor(
     scenario: ScenarioModel,
     initial_co2_ppm: float,
 ) -> tuple[float, float] | None:
-    """Return (imported_eq_c, model_eq_at_initial_forcing_c) for natural imported planets."""
+    """Return (imported_eq_c_with_atmosphere, model_eq_at_initial_forcing_c_unclamped) for natural imported planets."""
     if not bool(scenario.planet.natural_planet_mode):
         return None
     imported_teq_k = scenario.planet.imported_equilibrium_temperature_k
     if imported_teq_k is None:
         return None
-    imported_eq_c = clamp(
+    imported_eq_base_c = clamp(
         ensure_finite(float(imported_teq_k) - 273.15, 0.0),
+        temperature_clamp_min_c,
+        temperature_clamp_max_c,
+    )
+    imported_greenhouse_offset_c = _natural_imported_greenhouse_offset_c(scenario, initial_co2_ppm)
+    imported_eq_c = clamp(
+        imported_eq_base_c + imported_greenhouse_offset_c,
         temperature_clamp_min_c,
         temperature_clamp_max_c,
     )
@@ -56,19 +94,32 @@ def _natural_imported_temperature_anchor(
         co2_ppm=initial_co2_ppm,
         K_CO2=scenario.planet.K_CO2,
     )
-    model_eq_c = clamp(
-        ensure_finite(model_eq_c, imported_eq_c),
-        temperature_clamp_min_c,
-        temperature_clamp_max_c,
-    )
+    model_eq_c = ensure_finite(model_eq_c, imported_eq_c)
     return imported_eq_c, model_eq_c
+
+
+def _is_extreme_hot_imported_world(
+    scenario: ScenarioModel,
+    imported_anchor: tuple[float, float] | None,
+) -> bool:
+    if not bool(scenario.planet.natural_planet_mode):
+        return False
+    if imported_anchor is None:
+        return False
+    imported_eq_c, _ = imported_anchor
+    return float(imported_eq_c) >= EXTREME_HOT_IMPORTED_THRESHOLD_C
 
 
 def initial_temperature_c(scenario: ScenarioModel | Mapping[str, Any]) -> float:
     scenario_obj = scenario_from_any(scenario)
     imported_teq_k = scenario_obj.planet.imported_equilibrium_temperature_k
     if imported_teq_k is not None:
-        T0 = float(imported_teq_k) - 273.15
+        imported_teq_c = float(imported_teq_k) - 273.15
+        imported_greenhouse_offset_c = _natural_imported_greenhouse_offset_c(
+            scenario_obj,
+            scenario_obj.planet.initial_co2_ppm,
+        )
+        T0 = imported_teq_c + imported_greenhouse_offset_c
         return clamp(ensure_finite(T0, 0.0), temperature_clamp_min_c, temperature_clamp_max_c)
 
     T_eq, _ = equilibrium_temperature_c(
@@ -79,6 +130,82 @@ def initial_temperature_c(scenario: ScenarioModel | Mapping[str, Any]) -> float:
         K_CO2=scenario_obj.planet.K_CO2,
     )
     return clamp(ensure_finite(T_eq, 0.0), temperature_clamp_min_c, temperature_clamp_max_c)
+
+
+def _natural_atmosphere_baseline_co2_ppm(scenario: ScenarioModel) -> float | None:
+    if not bool(scenario.planet.natural_planet_mode):
+        return None
+    assumption = scenario.planet.atmosphere_assumption
+    if assumption == "Custom":
+        return clamp(float(scenario.planet.initial_co2_ppm), CO2_min, CO2_max_hard)
+    if assumption in NATURAL_ATMOSPHERE_BASELINE_CO2_PPM:
+        return float(NATURAL_ATMOSPHERE_BASELINE_CO2_PPM[assumption])
+    return None
+
+
+def _natural_imported_assumption_value(
+    scenario: ScenarioModel,
+    mapping: dict[str, float],
+    *,
+    low: float,
+    high: float,
+) -> float:
+    assumption = scenario.planet.atmosphere_assumption
+    if assumption in mapping:
+        return float(mapping[assumption])
+    if assumption == "Custom":
+        co2_span = np.log10(CO2_max_hard / CO2_min)
+        co2_rel = np.log10(max(CO2_min, float(scenario.planet.initial_co2_ppm)) / CO2_min) / max(1e-9, co2_span)
+        return float(low + clamp(co2_rel, 0.0, 1.0) * (high - low))
+    return float(mapping["Earth-like"])
+
+
+def _natural_planet_outgassing_ppm_per_year(scenario: ScenarioModel) -> float:
+    if not bool(scenario.planet.natural_planet_mode):
+        return NATURAL_OUTGASSING_PPM_PER_YEAR
+    return _natural_imported_assumption_value(
+        scenario,
+        NATURAL_IMPORTED_OUTGASSING_PPM_PER_YEAR,
+        low=NATURAL_IMPORTED_OUTGASSING_PPM_PER_YEAR["Minimal"],
+        high=NATURAL_IMPORTED_OUTGASSING_PPM_PER_YEAR["Dense"],
+    )
+
+
+def _natural_planet_max_co2_rise_ppm_per_year(scenario: ScenarioModel) -> float | None:
+    if not bool(scenario.planet.natural_planet_mode):
+        return None
+    return _natural_imported_assumption_value(
+        scenario,
+        NATURAL_IMPORTED_MAX_CO2_RISE_PPM_PER_YEAR,
+        low=NATURAL_IMPORTED_MAX_CO2_RISE_PPM_PER_YEAR["Minimal"],
+        high=NATURAL_IMPORTED_MAX_CO2_RISE_PPM_PER_YEAR["Dense"],
+    )
+
+
+def _natural_imported_greenhouse_offset_c(
+    scenario: ScenarioModel,
+    co2_ppm: float,
+) -> float:
+    if not bool(scenario.planet.natural_planet_mode):
+        return 0.0
+    if scenario.planet.imported_equilibrium_temperature_k is None:
+        return 0.0
+    forcing_delta = co2_forcing_wm2(
+        co2_ppm=max(float(co2_ppm), CO2_min),
+        K_CO2=scenario.planet.K_CO2,
+        co2_base=NATURAL_IMPORTED_GREENHOUSE_BASELINE_CO2_PPM,
+    )
+    offset_c = max(0.0, float(forcing_delta) * NATURAL_IMPORTED_GREENHOUSE_TEMP_PER_WM2)
+    return clamp(offset_c, 0.0, NATURAL_IMPORTED_GREENHOUSE_MAX_OFFSET_C)
+
+
+def _natural_atmosphere_relaxation_ppm_per_year(
+    co2_ppm: float,
+    baseline_co2_ppm: float | None,
+) -> float:
+    if baseline_co2_ppm is None:
+        return 0.0
+    return (float(baseline_co2_ppm) - float(co2_ppm)) / max(1.0, NATURAL_ATMOSPHERE_RELAX_YEARS)
 
 
 def _regime_label(
@@ -95,36 +222,18 @@ def _regime_label(
     warm_albedo: float,
     ice_albedo: float,
 ) -> str:
-    co2_ratio = max(float(co2_ppm), CO2_min) / CO2_BASELINE_PPM
-    co2_pressure = max(0.0, safe_log(co2_ratio))
-    hot_stress = max(0.0, (float(temp_c) - 18.0) / 9.0)
-    cold_stress = max(0.0, (8.0 - float(temp_c)) / 10.0)
-    high_co2_penalty = max(0.0, (float(co2_ppm) - 700.0) / 500.0)
-    habitability_stress = max(0.0, (75.0 - float(habitable_pct)) / 28.0)
-
-    base_score = 0.85 * co2_pressure + 1.00 * hot_stress + 0.45 * cold_stress + 0.48 * habitability_stress + 0.40 * high_co2_penalty
-    emissions_pressure = {
-        "Aggressive Mitigation": -0.35,
-        "Stabilization": -0.18,
-        "Constant": 0.08,
-        "Growing": 0.28,
-        "Carefree": 0.38,
-    }.get(mode, 0.10)
-
-    years_until_mitigation = max(0, int(mitigation_start_year) - int(year))
-    delay_pressure = 0.22 * clamp(years_until_mitigation / 120.0, 0.0, 1.0)
-    weakness_pressure = 0.14 * (1.0 - float(mitigation_strength)) * (1.0 if years_until_mitigation > 0 else 0.4)
-    mitigation_pressure = delay_pressure + weakness_pressure
-
-    trend_pressure = 3.2 * max(0.0, dtemp) + 0.040 * max(0.0, dco2) + 0.045 * max(0.0, -dhabitable)
-    cold_lock_in = 0.12 * clamp((5.0 - temp_c) / 15.0, 0.0, 1.0) * clamp((ice_albedo - warm_albedo - 0.20) / 0.40, 0.0, 1.0)
-    score = base_score + emissions_pressure + mitigation_pressure + trend_pressure + cold_lock_in
-
-    if score < 1.05:
+    _ = (co2_ppm, mode, mitigation_start_year, mitigation_strength, dtemp, dco2, dhabitable, year, warm_albedo, ice_albedo)
+    t_c = float(temp_c)
+    h_pct = float(habitable_pct)
+    if h_pct >= REGIME_STABLE_HABITABLE_MIN_PCT and REGIME_STABLE_TEMP_MIN_C <= t_c <= REGIME_STABLE_TEMP_MAX_C:
         return "Stable"
-    if score < 2.25:
-        return "Marginal"
-    return "Unstable"
+    if (
+        h_pct <= REGIME_UNSTABLE_HABITABLE_MAX_PCT
+        or t_c <= REGIME_UNSTABLE_TEMP_MIN_C
+        or t_c >= REGIME_UNSTABLE_TEMP_MAX_C
+    ):
+        return "Unstable"
+    return "Marginal"
 
 
 def _event_specifications() -> list[dict[str, str]]:
@@ -197,6 +306,8 @@ def simulate_time_series(
     co2_ppm = clamp(float(s.planet.initial_co2_ppm), CO2_min, CO2_max_hard)
     temp_c = initial_temperature_c(s)
     imported_anchor = _natural_imported_temperature_anchor(s, co2_ppm)
+    extreme_hot_world = _is_extreme_hot_imported_world(s, imported_anchor)
+    natural_atmosphere_baseline = _natural_atmosphere_baseline_co2_ppm(s)
     event_specs = _event_specifications()
     mitigation_event_added = False
     prev_flags: dict[str, bool] | None = None
@@ -304,24 +415,45 @@ def simulate_time_series(
         if imported_anchor is not None:
             imported_eq_c, model_eq_ref_c = imported_anchor
             # Preserve forcing sensitivity while anchoring the natural-mode baseline to imported Teq.
-            temp_eq_c = imported_eq_c + (float(temp_eq_c_model) - float(model_eq_ref_c))
+            forcing_delta_c = float(temp_eq_c_model) - float(model_eq_ref_c)
+            if extreme_hot_world:
+                forcing_delta_c = clamp(
+                    forcing_delta_c,
+                    -EXTREME_HOT_ANCHOR_DELTA_CAP_C,
+                    EXTREME_HOT_ANCHOR_DELTA_CAP_C,
+                )
+            temp_eq_c = imported_eq_c + forcing_delta_c
         else:
             temp_eq_c = float(temp_eq_c_model)
         temp_eq_c = clamp(ensure_finite(temp_eq_c, temp_c), temperature_clamp_min_c, temperature_clamp_max_c)
+        response_years = TEMPERATURE_RESPONSE_YEARS
+        if extreme_hot_world:
+            response_years = max(TEMPERATURE_RESPONSE_YEARS, EXTREME_HOT_RESPONSE_YEARS)
         temp_next = temperature_relaxation_update(
             temp_c=temp_c,
             temp_eq_c=temp_eq_c,
             co2_ppm=co2_ppm,
             dt_years=dt,
-            response_years=TEMPERATURE_RESPONSE_YEARS,
+            response_years=response_years,
             stellar_flux_multiplier=s.planet.stellar_flux_multiplier,
             warm_albedo=s.planet.warm_albedo,
             ice_albedo=s.planet.ice_albedo,
         )
+        if extreme_hot_world:
+            max_step_c = EXTREME_HOT_MAX_STEP_C_PER_YEAR * dt
+            temp_next = clamp(temp_next, temp_c - max_step_c, temp_c + max_step_c)
 
         sink_weathering = weathering_sink_ppm_per_year(temp_c=temp_c, co2_ppm=co2_ppm)
         sink_biosphere = biosphere_sink_ppm_per_year(T_global_c=temp_c, CO2_ppm=co2_ppm, H_pct=habitable_pct)
-        dco2_dt = float(civ_terms["E_human_eff"]) + NATURAL_OUTGASSING_PPM_PER_YEAR - sink_weathering - sink_biosphere
+        outgassing_ppm_per_year = _natural_planet_outgassing_ppm_per_year(s)
+        dco2_dt = float(civ_terms["E_human_eff"]) + outgassing_ppm_per_year - sink_weathering - sink_biosphere
+        dco2_dt += _natural_atmosphere_relaxation_ppm_per_year(
+            co2_ppm=co2_ppm,
+            baseline_co2_ppm=natural_atmosphere_baseline,
+        )
+        max_rise_ppm_per_year = _natural_planet_max_co2_rise_ppm_per_year(s)
+        if max_rise_ppm_per_year is not None:
+            dco2_dt = min(dco2_dt, float(max_rise_ppm_per_year))
 
         CO2_safe = max(co2_ppm, CO2_min)
         co2_next = max(CO2_min, CO2_safe + dco2_dt * dt)
@@ -350,12 +482,19 @@ def simulate_time_series(
             "T0_c": float(temp_c_series[0]) if len(temp_c_series) else 0.0,
             "natural_planet_mode": bool(s.planet.natural_planet_mode),
             "import_classification": s.planet.import_classification,
+            "outside_calibrated_habitable_regime": bool(extreme_hot_world),
+            "extreme_hot_diagnostic_mode": bool(extreme_hot_world),
+            "diagnostic_label": EXTREME_HOT_DIAGNOSTIC_LABEL if extreme_hot_world else None,
+            "trajectory_mode": "stabilized_diagnostic" if extreme_hot_world else "nominal",
         },
     }
     return result
 
 
-def preview_state(scenario: ScenarioModel | Mapping[str, Any], horizon_years: int = PREVIEW_HORIZON_YEARS) -> dict[str, float | str]:
+def preview_state(
+    scenario: ScenarioModel | Mapping[str, Any],
+    horizon_years: int = PREVIEW_HORIZON_YEARS,
+) -> dict[str, float | str | bool | None]:
     s = scenario_from_any(scenario)
     horizon = max(1, int(horizon_years))
     series = simulate_time_series(s, years=horizon, dt_years=1.0)
@@ -366,7 +505,9 @@ def preview_state(scenario: ScenarioModel | Mapping[str, Any], horizon_years: in
     hab0 = float(series["habitable_surface_percent"][idx0])
     alb0 = float(series["effective_albedo"][idx0])
     co2_h = float(series["co2_ppm"][idx_h])
+    regime_0 = str(series["regime"][idx0])
     regime_h = str(series["regime"][idx_h])
+    meta = dict(series.get("meta", {}))
 
     ice_fraction = clamp((alb0 - s.planet.warm_albedo) / max(1e-6, s.planet.ice_albedo - s.planet.warm_albedo), 0.0, 1.0)
     flux_cold = clamp((1.0 - s.planet.stellar_flux_multiplier) / 0.18, 0.0, 1.0)
@@ -404,8 +545,12 @@ def preview_state(scenario: ScenarioModel | Mapping[str, Any], horizon_years: in
         "runaway_score": runaway_score,
         "stability_index": float(max(0.0, snowball_score + runaway_score)),
         "stability_outlook": regime_h,
-        "system_state": regime_h,
+        "system_state": regime_0,
         "tipping_label": tipping_label,
         "net_emissions": float(series["human_emissions_eff"][idx0]) + NATURAL_OUTGASSING_PPM_PER_YEAR,
         "T0_c": float(series["meta"]["T0_c"]),
+        "outside_calibrated_habitable_regime": bool(meta.get("outside_calibrated_habitable_regime", False)),
+        "extreme_hot_diagnostic_mode": bool(meta.get("extreme_hot_diagnostic_mode", False)),
+        "diagnostic_label": meta.get("diagnostic_label"),
+        "trajectory_mode": str(meta.get("trajectory_mode", "nominal")),
     }

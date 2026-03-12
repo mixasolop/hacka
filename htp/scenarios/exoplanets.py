@@ -17,7 +17,7 @@ EXOPLANET_ARCHIVE_QUERY = (
     "select pl_name,hostname,pl_insol,pl_eqt,pl_orbeccen "
     "from ps where default_flag=1 and pl_name is not null and pl_insol is not null"
 )
-EXOPLANET_SAMPLE_SIZE = 100
+EXOPLANET_SAMPLE_SIZE = 50
 
 
 def fetch_exoplanet_rows(*, timeout: float = 20.0) -> list[dict[str, Any]]:

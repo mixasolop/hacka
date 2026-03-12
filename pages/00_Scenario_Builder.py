@@ -83,6 +83,12 @@ INTERNAL_MODEL_CONSTANTS = {
     "planet_radius_km": DEFAULT_PLANET_RADIUS_KM,
 }
 
+ATMOSPHERIC_PREVIEW_ASSUMPTIONS = ("Minimal", "Earth-like", "Dense")
+ATMOSPHERIC_SENSITIVITY_TEMP_LOW_C = 4.0
+ATMOSPHERIC_SENSITIVITY_TEMP_MODERATE_C = 12.0
+ATMOSPHERIC_SENSITIVITY_HABITABLE_LOW_PCT = 15.0
+ATMOSPHERIC_SENSITIVITY_HABITABLE_MODERATE_PCT = 35.0
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_exoplanet_rows():
     return fetch_exoplanet_rows(timeout=20.0)
@@ -254,6 +260,88 @@ def _kpi_habitability_level(habitable_surface_pct: float):
     if habitable_surface_pct < 75.0:
         return "Moderate"
     return "High"
+
+
+def _assumption_preview_row(
+    row: dict,
+    assumption: str,
+    custom_initial_co2_ppm: float,
+) -> dict[str, float | str | bool]:
+    raw = dict(row)
+    if assumption == "Custom":
+        raw["initial_co2_ppm"] = custom_initial_co2_ppm
+    flat = normalize_imported_planet_flat(raw, atmosphere_assumption=assumption)
+    scenario = scenario_from_flat_params(flat, preset_name=str(raw.get("pl_name", "")).strip() or None)
+    derived = preview_state(scenario, horizon_years=PREVIEW_HORIZON_YEARS)
+    return {
+        "assumption": assumption,
+        "temperature_c": float(derived["temperature_c"]),
+        "habitable_surface_pct": float(derived["habitable_surface_pct"]),
+        "regime": str(derived["system_state"]),
+        "outside_calibrated_habitable_regime": bool(derived.get("outside_calibrated_habitable_regime", False)),
+        "diagnostic_label": str(derived.get("diagnostic_label") or ""),
+    }
+
+
+def _classify_atmospheric_sensitivity(temp_spread_c: float, habitable_spread_pct: float) -> str:
+    if (
+        temp_spread_c <= ATMOSPHERIC_SENSITIVITY_TEMP_LOW_C
+        and habitable_spread_pct <= ATMOSPHERIC_SENSITIVITY_HABITABLE_LOW_PCT
+    ):
+        return "Low"
+    if (
+        temp_spread_c <= ATMOSPHERIC_SENSITIVITY_TEMP_MODERATE_C
+        and habitable_spread_pct <= ATMOSPHERIC_SENSITIVITY_HABITABLE_MODERATE_PCT
+    ):
+        return "Moderate"
+    return "High"
+
+
+def _build_atmospheric_sensitivity_preview(row: dict, active_assumption: str):
+    custom_initial_co2 = safe_float(st.session_state.get("initial_co2_ppm"), CO2_INPUT_MIN)
+    standard_rows = [
+        _assumption_preview_row(row, assumption, custom_initial_co2)
+        for assumption in ATMOSPHERIC_PREVIEW_ASSUMPTIONS
+    ]
+    preview_rows = list(standard_rows)
+    if active_assumption == "Custom":
+        preview_rows.append(_assumption_preview_row(row, "Custom", custom_initial_co2))
+
+    standard_temps = [float(item["temperature_c"]) for item in standard_rows]
+    standard_habitability = [float(item["habitable_surface_pct"]) for item in standard_rows]
+    temp_spread_c = max(standard_temps) - min(standard_temps)
+    habitable_spread_pct = max(standard_habitability) - min(standard_habitability)
+    sensitivity_level = _classify_atmospheric_sensitivity(temp_spread_c, habitable_spread_pct)
+    return preview_rows, temp_spread_c, habitable_spread_pct, sensitivity_level
+
+
+def _render_atmospheric_sensitivity_preview(row: dict, active_assumption: str):
+    preview_rows, temp_spread_c, habitable_spread_pct, sensitivity_level = _build_atmospheric_sensitivity_preview(
+        row,
+        active_assumption,
+    )
+    with st.container(border=True):
+        st.markdown("**Atmospheric Sensitivity Preview**")
+        st.caption("Compares imported planet outcomes across standard atmosphere assumptions.")
+        cols = st.columns(len(preview_rows))
+        for col, item in zip(cols, preview_rows):
+            assumption = str(item["assumption"])
+            active_text = " (Active)" if assumption == active_assumption else ""
+            with col:
+                st.caption(f"{assumption}{active_text}")
+                st.caption(f"Temp: {float(item['temperature_c']):.1f} C")
+                st.caption(f"Habitable: {float(item['habitable_surface_pct']):.1f}%")
+                st.caption(f"Regime: {item['regime']}")
+                if bool(item.get("outside_calibrated_habitable_regime", False)):
+                    st.caption(f"{item.get('diagnostic_label') or 'Outside calibrated habitable regime'}")
+        st.markdown(
+            (
+                f"Sensitivity: <span style='color:{status_color(sensitivity_level)};font-weight:700;'>"
+                f"{sensitivity_level} sensitivity</span> | Spread across Minimal/Earth-like/Dense: "
+                f"Temp {temp_spread_c:.1f} C, Habitable {habitable_spread_pct:.1f}%"
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 def _initialize_state():
@@ -482,12 +570,13 @@ def render_scenario_builder_page():
             _apply_exoplanet_preset(preset_name, exoplanet_option_map[preset_name], assumption)
             st.rerun()
         else:
-            st.warning("Selected preset is unavailable. Use Show More and try Random 100 again.")
+            st.warning("Selected preset is unavailable. Use Show More and try Random 50 again.")
     if preset_cols[2].button("Reset to Default", type="secondary", use_container_width=True):
         st.session_state["force_preset_name_once"] = "Earth-like Baseline"
         _apply_preset("Earth-like Baseline")
         st.rerun()
 
+    selected_exoplanet = st.session_state.get("selected_exoplanet_row")
     extra_cols = st.columns([1.0, 1.0, 2.8])
     if not show_exoplanet_presets:
         if extra_cols[0].button("Show More", type="secondary", use_container_width=True):
@@ -500,7 +589,7 @@ def render_scenario_builder_page():
             if is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))):
                 _apply_preset("Earth-like Baseline")
             st.rerun()
-        if extra_cols[1].button("Random 100", type="secondary", use_container_width=True):
+        if extra_cols[1].button("Random 50", type="secondary", use_container_width=True):
             _refresh_exoplanet_sample()
             st.rerun()
         extra_cols[2].caption(
@@ -512,8 +601,17 @@ def render_scenario_builder_page():
             key="exoplanet_atmosphere_assumption",
             help="Used when applying an imported exoplanet preset.",
         )
+        active_preset_name = str(st.session_state.get("preset_name", ""))
+        if is_exoplanet_preset_name(active_preset_name) and isinstance(selected_exoplanet, dict):
+            selected_assumption = str(
+                st.session_state.get("exoplanet_atmosphere_assumption", EXOPLANET_ATMOSPHERE_OPTIONS[0])
+            )
+            active_assumption = str(st.session_state.get("atmosphere_assumption") or "")
+            if selected_assumption != active_assumption:
+                _apply_exoplanet_preset(active_preset_name, selected_exoplanet, selected_assumption)
+                st.rerun()
+            _render_atmospheric_sensitivity_preview(selected_exoplanet, selected_assumption)
 
-    selected_exoplanet = st.session_state.get("selected_exoplanet_row")
     if is_exoplanet_preset_name(str(st.session_state.get("preset_name", ""))) and isinstance(selected_exoplanet, dict):
         pl_name = str(selected_exoplanet.get("pl_name", "Unknown")).strip() or "Unknown"
         host = str(selected_exoplanet.get("hostname", "")).strip()
@@ -544,6 +642,8 @@ def render_scenario_builder_page():
     st.session_state["builder_persisted_inputs"] = dict(current_inputs)
     st.session_state["builder_persisted_preset_name"] = str(st.session_state.get("preset_name", "Earth-like Baseline"))
     derived = _estimate_state(current_inputs)
+    if bool(derived.get("outside_calibrated_habitable_regime", False)):
+        st.caption("Extreme Hot World | Outside calibrated habitable regime | Stabilized diagnostic trajectory")
 
     st.subheader("Current Predicted State")
     st.caption("Estimated from the current parameter configuration before full simulation.")
