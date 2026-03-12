@@ -1,0 +1,11 @@
+{
+  "atmosphere": "Minimal",
+  "failed_samples": 0,
+  "mean_ai_realism_score": 17.8,
+  "mean_correctness": 15.35165278728885,
+  "mean_physics_score": 14.302361124698361,
+  "model": "gpt-4o-mini",
+  "processed_samples": 200,
+  "requested_samples": 200,
+  "successful_samples": 200
+}

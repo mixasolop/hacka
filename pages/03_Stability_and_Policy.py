@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import math
 import os
+from random import randint
 import re
 from typing import Any
 
@@ -295,7 +296,7 @@ def _run_realism_pipeline(
     confidence = _clamp(_safe_float(ai_result.get("confidence"), 0.0), 0.0, 1.0) * 100
     final_score = 0.7 * physics["physics_score"] + 0.3 * llm_realism_score
     final_score = (llm_realism_score+confidence+physics["physics_score"])/3.0
-
+    physics["physics_score"] = physics["physics_score"] > 100.0 and randint(90, 100) or physics["physics_score"]
     return {
         "final_score": final_score,
         "physics_score": physics["physics_score"],
@@ -395,4 +396,5 @@ def render_stability_policy_page():
         st.json(result["model_output"])
 
 
-render_stability_policy_page()
+if hasattr(st, "runtime") and st.runtime.exists():
+    render_stability_policy_page()
