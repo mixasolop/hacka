@@ -1,7 +1,7 @@
 # Habitat Tipping Points
 
 Interactive Streamlit application for exploring climate tipping risks on Earth-like and exoplanet scenarios.  
-The app combines scenario design, time-series simulation, spatial habitability mapping, and AI-assisted realism checks.
+The app combines scenario design, time-series simulation, spatial habitability mapping, and AI-assisted interpretation of forecast realism.
 
 ## What the app includes
 
@@ -24,7 +24,8 @@ The app combines scenario design, time-series simulation, spatial habitability m
 
 ### 4) Refugia Map
 ![Refugia Map](docs/screenshots/05-refugia-map.png)
-### 6) Planet Forecast Evaluation
+
+### 5) Forecast Evaluation and AI-Assisted Review
 ![Planet Forecast Evaluation](docs/screenshots/06-forecast-evaluation.png)
 
 ## Quick start
@@ -82,11 +83,13 @@ average_chat_percentage.py      # Batch realism evaluation script
 - North, G. R. (1975). *Theory of Energy-Balance Climate Models*. Journal of the Atmospheric Sciences. https://doi.org/10.1175/1520-0469(1975)032<2033:TOEBCM>2.0.CO;2
 - NASA Exoplanet Archive TAP docs. https://exoplanetarchive.ipac.caltech.edu/docs/TAP/usingTAP.html
 
-## Physical Formulas Used in Calculations
+## Model Equations, Heuristics, and Update Rules
 
 This section summarizes the equations currently implemented in the codebase (`htp/model/*` and map/evaluation pages).
 
 ### 1) Core climate and radiative balance
+
+These equations form a reduced-order climate core and include both physics-inspired terms and calibrated stabilizing heuristics.
 
 - Logistic helper:
   - $\sigma(x) = \frac{1}{1 + e^{-x}}$
@@ -98,7 +101,7 @@ This section summarizes the equations currently implemented in the codebase (`ht
 - CO2 forcing parameterization:
   - $F_{CO2} = K_{CO2} \ln\left(\frac{\max(C, C_{min})}{C_0}\right)$
 
-- Iterative equilibrium temperature:
+- Calibrated equilibrium temperature proxy:
   - $I_{cold} = \sigma\left(\frac{6 - T}{4}\right)$
   - $A_{contrast} = \mathrm{clamp}\left(\frac{\alpha_{ice} - \alpha_{warm} - 0.18}{0.45}, 0, 1\right)$
   - $L_{flux} = \mathrm{clamp}\left(\frac{1 - S}{0.22}, 0, 1\right)$
@@ -127,14 +130,14 @@ This section summarizes the equations currently implemented in the codebase (`ht
   - $B_A = \mathrm{clamp}\left(\frac{H-30}{30}, 0, 1\right)$
   - $B = k_b \left(\frac{C}{C_0}\right) B_T B_A$
 
-- Natural-atmosphere relaxation (natural-planet mode):
+- heuristic atmospheric relaxation term used in natural-planet mode:
   - $R_{atm} = \frac{C_{base} - C}{\tau_{atm}}$
 
 - CO2 ODE and update:
   - $\frac{dC}{dt} = E_{human,eff} + V_{nat} - W - B + R_{atm}$
   - $C_{next} = \mathrm{clamp}(C + \frac{dC}{dt}\Delta t,\; C_{min}, C_{max})$
 
-- Imported-world greenhouse offset:
+- IImported-world greenhouse proxy term (used only when atmospheric composition is unknown):
   - $\Delta T_{imp} = \mathrm{clamp}\left(\max(0,\lambda_{imp} \cdot K_{CO2}\ln(C/C_{base,imp})),\;0,\Delta T_{max}\right)$
 
 ### 3) Latitudinal and local habitability
@@ -143,7 +146,7 @@ This section summarizes the equations currently implemented in the codebase (`ht
   - $T(\phi) = T_g + A_{eq}\cos^2\phi - A_{pol}\sin^2\phi + T_{season}$
   - $T_{season} = 0.8\sin(2\pi \cdot phase)\sin\phi$ (when seasonality enabled)
 
-- Shape terms:
+- Calibrated latitudinal shape terms:
   - $A_{eq} = \mathrm{clamp}(4.8 + 1.05H_{hot} - 0.08H_{cold} + 6S_{amp}, 2.5, 18)$
   - $A_{pol} = \mathrm{clamp}(20 + 0.55H_{cold} + 0.65H_{hot} + 6\max(0,\alpha_{ice}-\alpha_{warm}-0.20) + 12S_{amp}, 12, 42)$
   - $H_{hot}=\max(0, T_g-22)$, $H_{cold}=\max(0, 8-T_g)$
@@ -156,11 +159,11 @@ This section summarizes the equations currently implemented in the codebase (`ht
 - Area-weighted habitable fraction:
   - $H_{global} = 100 \cdot \frac{\sum_\phi \cos\phi \cdot h(\phi)}{\sum_\phi \cos\phi}$
 
-- Global stress:
+- Global climate stress penalty:
   - $S = \mathrm{clamp}(0.23S_{hot}+0.14S_{cold}+0.18S_{CO2}+0.10S_{spread}+0.18S_{comfort}, 0, 0.50)$
   - Where each component is normalized and clamped in code.
 
-- Local temperature field:
+- Heuristic local climate downscaling for map rendering:
   - $T_{local} = T_{lat\_interp} + \mu_{micro} - L_{elev} + \Delta T_{class}$
   - $L_{elev} = 4.3\cdot \mathrm{clip}(z,0,4.5) + 0.7\cdot \mathrm{clip}(z,-1,0)$
   - $\Delta T_{class}$: desert $+3.8^\circ C$, snow/ice $-8.5^\circ C$, vegetated $+0.2^\circ C$
@@ -170,6 +173,8 @@ This section summarizes the equations currently implemented in the codebase (`ht
   - Oceans are forced to 0 in the map rendering pipeline.
 
 ### 4) Civilization-emissions coupling
+
+Civilization is modeled as a fragile societal layer on top of climate, rather than as a physical climate variable.
 
 - Smoothstep:
   - $smoothstep(x)=t^2(3-2t)$, $t=\mathrm{clamp}(x,0,1)$
@@ -193,28 +198,11 @@ This section summarizes the equations currently implemented in the codebase (`ht
 
 ### 5) Earth map and geometry formulas
 
-- Longitude wrapping:
-  - $\lambda_{wrap} = ((\lambda + 180) \bmod 360) - 180$
+Planetary map rendering uses heuristic elevation, microclimate, and biome masks to project Climate Twin results onto a spherical surface.
 
-- Spherical coordinates to Cartesian:
-  - $x = r\cos\phi\cos\lambda$
-  - $y = r\cos\phi\sin\lambda$
-  - $z = r\sin\phi$
+### 6) Forecast realism physics check
 
-- Globe tilt rotation (about $y$):
-  - $x' = \cos\theta \cdot x + \sin\theta \cdot z$
-  - $y' = y$
-  - $z' = -\sin\theta \cdot x + \cos\theta \cdot z$
-
-- Earth texture/elevation heuristics (used by `earth_surface_fields`):
-  - Gaussian regional kernel:
-    - $G = \exp\left(-\frac{1}{2}\left[\left(\frac{\Delta lat}{\sigma_{lat}}\right)^2+\left(\frac{\Delta lon}{\sigma_{lon}}\right)^2\right]\right)$
-  - Elevation and microclimate are built from weighted trigonometric wave fields + regional masks (desert/snow/ice), then clamped.
-
-- Refugia Map tile CO2 adjustment:
-  - $C_{tile} = \mathrm{clip}\left(C_g \cdot \exp\left(-\frac{\mathrm{clip}(z,-1,8)}{8.5}\right)\cdot \left(1 + 0.04\cdot\mathrm{clip}(-z,0,4)\right),\;1,\infty\right)$
-
-### 6) Forecast realism physics check (evaluation page)
+This score is a lightweight consistency diagnostic, not a formal validation metric.
 
 - Reference equilibrium estimate:
   - $T_{exp} = 255 \cdot S^{1/4}$
@@ -222,7 +210,7 @@ This section summarizes the equations currently implemented in the codebase (`ht
 - Temperature error:
   - $\Delta T = |T_{final} - T_{exp}|$
 
-- Heuristic physics score:
+- Heuristic consistency score:
   - $Score_{phys} = 10000 \cdot \exp\left(-(\Delta T/15)^2\right)$
 
 ---
